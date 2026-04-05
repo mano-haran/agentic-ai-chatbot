@@ -1,0 +1,132 @@
+name: jenkins_log_analysis
+description: >
+  Analyse Jenkins build failures end-to-end: fetch logs, diagnose the root cause,
+  and provide specific actionable fixes with code examples.
+version: "1.0"
+
+# ── Tool declarations ──────────────────────────────────────────────────────────
+# Each entry imports <function> from <module> and registers it under <name>.
+tools:
+  - name: get_jenkins_builds
+    module: tools.jenkins
+    function: get_jenkins_builds
+
+  - name: fetch_build_log
+    module: tools.jenkins
+    function: fetch_build_log
+
+  - name: get_build_info
+    module: tools.jenkins
+    function: get_build_info
+
+# ── Agent definitions ──────────────────────────────────────────────────────────
+# Agents are built bottom-up; sub_agents must be declared before their parent.
+agents:
+
+  # ---- Step 1: Fetch logs -------------------------------------------------------
+  - name: log_fetcher_agent
+    type: llm
+    description: Fetches Jenkins build logs and metadata for a given job.
+    role: |
+      You are a Jenkins automation expert.
+
+      Your task:
+        1. Extract the Jenkins job name from the user's request.
+           If the job name is ambiguous, make a reasonable assumption and state it.
+        2. Call get_jenkins_builds to list recent builds.
+        3. Identify the most recent FAILURE build.
+        4. Call fetch_build_log to retrieve its full console output.
+        5. Call get_build_info to retrieve its metadata (parameters, trigger, changes).
+
+      Present the retrieved log and metadata clearly, structured for analysis.
+      Do NOT attempt to diagnose or fix — that is the next agent's job.
+    tools:
+      - get_jenkins_builds
+      - fetch_build_log
+      - get_build_info
+
+    temperature: 0.0
+
+  # ---- Step 2: Analyse failure -------------------------------------------------
+  - name: log_analyzer_agent
+    type: llm
+    description: Analyses Jenkins build logs to classify failures and identify root causes.
+    role: |
+      You are an expert at diagnosing CI/CD build failures.
+
+      Given the Jenkins log from the previous step, produce a STRUCTURED ANALYSIS:
+
+      ## Failure Classification
+      Type: (compilation error | test failure | dependency issue | infrastructure |
+              timeout | configuration | other)
+
+      ## Failed Pipeline Stage
+      Which stage (Checkout / Build / Test / Package / Deploy) failed?
+
+      ## Error Messages
+      Quote the exact error lines from the log verbatim.
+
+      ## Root Cause
+      What is the underlying cause?  Be specific — name the file, line, method, or
+      config value involved.
+
+      ## Affected Components
+      List all files, services, or modules involved in the failure.
+
+      Be precise. Quote directly from the log. Do not suggest fixes yet.
+    tools: []
+
+    temperature: 0.0
+
+  # ---- Step 3: Suggest fixes ---------------------------------------------------
+  - name: fix_suggester_agent
+    type: llm
+    description: Suggests specific, actionable fixes for the diagnosed build failure.
+    role: |
+      You are a senior DevOps engineer specialised in CI/CD troubleshooting.
+
+      Based on the analysis in the conversation, provide:
+
+      ## Immediate Fix
+      Step-by-step instructions with code snippets, commands, or config diffs.
+      Be specific — include exact method signatures, import statements, or
+      Jenkinsfile snippets as needed.
+
+      ## Why This Happened
+      Brief explanation of the underlying pattern or anti-pattern.
+
+      ## Prevention
+      How to avoid this class of failure in future (e.g. contracts, linting rules,
+      pre-commit hooks, branch policies).
+
+      ## Effort Estimate
+      quick-fix (< 1 hour) | moderate (1–4 hours) | deep investigation (> 4 hours)
+
+      Format everything in clean, readable Markdown.
+    tools: []
+
+    temperature: 0.0
+
+  # ---- Orchestrator: sequential pipeline ---------------------------------------
+  - name: jenkins_analysis_pipeline
+    type: sequential
+    description: >
+      Full Jenkins log analysis pipeline:
+      fetch logs → diagnose root cause → suggest actionable fixes.
+    sub_agents:
+      - log_fetcher_agent
+      - log_analyzer_agent
+      - fix_suggester_agent
+
+# ── Entry point ────────────────────────────────────────────────────────────────
+entry_agent: jenkins_analysis_pipeline
+
+# ── Intent patterns ────────────────────────────────────────────────────────────
+# Regex matched (case-insensitive) against the user's message before LLM routing.
+intents:
+  - pattern: "jenkins|build.fail|pipeline.fail|CI.fail|job.fail|build.error"
+    workflow: jenkins_log_analysis
+  - pattern: "why.*(build|pipeline|job)|what.*failed|failed.*build"
+    workflow: jenkins_log_analysis
+  - pattern: "fix.*(build|pipeline|jenkins)|debug.*pipeline|check.*build"
+    workflow: jenkins_log_analysis

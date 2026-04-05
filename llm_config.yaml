@@ -1,0 +1,80 @@
+# ── Provider definitions ───────────────────────────────────────────────────────
+#
+# name        : unique label used in the models list below
+# client_type : which LangChain SDK to use — anthropic | openai | azure_openai | google
+# api_key_env : name of the .env variable that holds the API key
+# base_url_env: name of the .env variable that holds the custom endpoint (optional)
+# extra_env   : map of additional provider-specific params to .env variable names
+#
+# Adding a new provider (e.g. Claude on Azure AI Foundry):
+#   - name: azure_claude
+#     client_type: anthropic       # uses ChatAnthropic SDK with a custom base_url
+#     api_key_env: AZURE_CLAUDE_API_KEY
+#     base_url_env: AZURE_CLAUDE_ENDPOINT
+#
+providers:
+  - name: anthropic
+    client_type: anthropic
+    api_key_env: ANTHROPIC_API_KEY
+    base_url_env: ANTHROPIC_BASE_URL
+
+  - name: openai
+    client_type: openai
+    api_key_env: OPENAI_API_KEY
+    base_url_env: OPENAI_BASE_URL
+
+  - name: azure_openai
+    client_type: azure_openai
+    api_key_env: AZURE_OPENAI_API_KEY
+    base_url_env: AZURE_OPENAI_ENDPOINT
+    extra_env:
+      api_version: AZURE_OPENAI_API_VERSION
+
+  - name: google
+    client_type: google
+    api_key_env: GOOGLE_API_KEY
+    base_url_env: GOOGLE_BASE_URL
+
+
+# ── Model registry ─────────────────────────────────────────────────────────────
+#
+# id      : unique alias used in workflow configs and DEFAULT_MODEL / DEFAULT_ROUTING_MODEL
+# name    : actual model name sent to the API
+# provider: must match a provider name above
+#
+# Two entries with the same `name` but different providers are allowed.
+# Use distinct ids to tell them apart (e.g. gpt-4o vs gpt-4o-azure).
+#
+# DEFAULT_MODEL and DEFAULT_ROUTING_MODEL in .env must match an id here.
+#
+models:
+  # ── Anthropic ────────────────────────────────────────────────────────────────
+  - id: claude-opus-4-6
+    name: claude-opus-4-6
+    provider: anthropic
+
+  - id: claude-sonnet-4-6
+    name: claude-sonnet-4-6
+    provider: anthropic
+
+  - id: claude-haiku-4-5-20251001
+    name: claude-haiku-4-5-20251001
+    provider: anthropic
+
+  # ── OpenAI ───────────────────────────────────────────────────────────────────
+  - id: gpt-4o
+    name: gpt-4o
+    provider: openai
+
+  - id: gpt-4o-mini
+    name: gpt-4o-mini
+    provider: openai
+
+  # ── Google ───────────────────────────────────────────────────────────────────
+  - id: gemini-2.0-flash
+    name: gemini-2.0-flash
+    provider: google
+
+  - id: gemini-1.5-pro
+    name: gemini-1.5-pro
+    provider: google

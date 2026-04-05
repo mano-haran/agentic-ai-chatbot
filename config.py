@@ -1,0 +1,104 @@
+import os
+from dataclasses import dataclass, field
+from pathlib import Path
+
+import yaml
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# ── Defaults (model ids — must match an id in llm_config.yaml) ────────────────
+DEFAULT_MODEL: str = os.getenv("DEFAULT_MODEL", "")
+DEFAULT_ROUTING_MODEL: str = os.getenv("DEFAULT_ROUTING_MODEL", "")
+
+# ── Token limits ───────────────────────────────────────────────────────────────
+# Hard ceiling applied to every agent regardless of per-agent configuration.
+# Any per-agent max_tokens value that exceeds this will be silently clamped.
+# Adjust to control worst-case token spend across all agents.
+MAX_TOKENS_HARD_LIMIT: int = int(os.getenv("MAX_TOKENS_HARD_LIMIT", "4096"))
+
+
+def clamp_tokens(requested: int) -> int:
+    """Return requested tokens clamped to MAX_TOKENS_HARD_LIMIT."""
+    return min(requested, MAX_TOKENS_HARD_LIMIT)
+
+# ── Checkpointer ───────────────────────────────────────────────────────────────
+APP_ENV: str = os.getenv("APP_ENV", "dev")          # "dev" | "prod"
+POSTGRES_URL: str = os.getenv("POSTGRES_URL", "")   # only needed in prod
+
+# ── Tool integrations ──────────────────────────────────────────────────────────
+JENKINS_URL: str = os.getenv("JENKINS_URL", "http://localhost:8080")
+JENKINS_USER: str = os.getenv("JENKINS_USER", "")
+JENKINS_TOKEN: str = os.getenv("JENKINS_TOKEN", "")
+
+
+# ── LLM config (llm_config.yaml) ──────────────────────────────────────────────
+
+@dataclass
+class ModelResolution:
+    """Fully resolved model config ready for the provider factory."""
+    model_id: str           # id from llm_config.yaml (used in workflow configs)
+    name: str               # actual model name sent to the API
+    provider: str           # provider name (e.g. "anthropic")
+    client_type: str        # LangChain SDK to use: anthropic | openai | azure_openai | google
+    api_key: str            # resolved from .env
+    base_url: str           # resolved from .env (may be empty)
+    extra: dict = field(default_factory=dict)  # provider-specific extras (e.g. api_version)
+
+
+def _load_llm_config() -> dict:
+    path = Path(__file__).parent / "llm_config.yaml"
+    if not path.exists():
+        raise FileNotFoundError(
+            f"llm_config.yaml not found at {path}. "
+            "Create it from the documented template to register providers and models."
+        )
+    with open(path) as f:
+        return yaml.safe_load(f)
+
+
+_llm_cfg = _load_llm_config()
+_providers: dict[str, dict] = {p["name"]: p for p in _llm_cfg.get("providers", [])}
+_models: dict[str, dict] = {m["id"]: m for m in _llm_cfg.get("models", [])}
+
+
+def resolve_model(model_id: str) -> ModelResolution:
+    """
+    Look up a model id in llm_config.yaml and return fully resolved credentials.
+
+    Raises ValueError with the list of available ids if the id is not found.
+    """
+    if model_id not in _models:
+        available = ", ".join(sorted(_models.keys()))
+        raise ValueError(
+            f"Model id '{model_id}' not found in llm_config.yaml. "
+            f"Available ids: {available}"
+        )
+
+    model_entry = _models[model_id]
+    provider_name = model_entry["provider"]
+
+    if provider_name not in _providers:
+        raise ValueError(
+            f"Provider '{provider_name}' referenced by model '{model_id}' "
+            f"is not defined in llm_config.yaml providers list."
+        )
+
+    provider_entry = _providers[provider_name]
+    api_key  = os.getenv(provider_entry.get("api_key_env", ""), "")
+    base_url = os.getenv(provider_entry.get("base_url_env", ""), "")
+
+    extra = {
+        key: os.getenv(env_var, "")
+        for key, env_var in provider_entry.get("extra_env", {}).items()
+    }
+
+    return ModelResolution(
+        model_id=model_id,
+        name=model_entry["name"],
+        provider=provider_name,
+        client_type=provider_entry["client_type"],
+        api_key=api_key,
+        base_url=base_url,
+        extra=extra,
+    )
