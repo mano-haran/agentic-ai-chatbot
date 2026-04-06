@@ -46,6 +46,19 @@ JENKINS_URL: str = os.getenv("JENKINS_URL", "http://localhost:8080")
 JENKINS_USER: str = os.getenv("JENKINS_USER", "")
 JENKINS_TOKEN: str = os.getenv("JENKINS_TOKEN", "")
 
+# Confluence (used by confluence_qa workflow)
+CONFLUENCE_URL: str = os.getenv("CONFLUENCE_URL", "")
+CONFLUENCE_USER: str = os.getenv("CONFLUENCE_USER", "")
+CONFLUENCE_TOKEN: str = os.getenv("CONFLUENCE_TOKEN", "")
+
+# Vector store (Chroma) for Confluence RAG
+CHROMA_PATH: str = os.getenv("CHROMA_PATH", "data/chroma")
+CHROMA_COLLECTION: str = os.getenv("CHROMA_COLLECTION", "confluence")
+
+# Embedding provider: "local" (sentence-transformers, no API key needed) or "openai"
+EMBEDDING_PROVIDER: str = os.getenv("EMBEDDING_PROVIDER", "local")
+EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
+
 
 # ── LLM config (llm_config.yaml) ──────────────────────────────────────────────
 
