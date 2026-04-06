@@ -1,124 +1,183 @@
 """
-Jenkins tools — real implementations connect to the Jenkins REST API.
-The mock data below reproduces realistic Maven compilation failures so
-the workflow can be developed and tested without a live Jenkins instance.
+Jenkins tools — connect to the Jenkins REST API using HTTP Basic Auth.
 
-To wire up the real API:
-  1. Set JENKINS_URL / JENKINS_USER / JENKINS_TOKEN in .env
-  2. Replace the mock bodies with `requests` calls to the Jenkins JSON API
-     (e.g. GET /job/{job}/api/json  and  GET /job/{job}/{n}/consoleText)
+Required environment variables (set in .env):
+    JENKINS_USER   Jenkins username (e.g. "admin")
+    JENKINS_TOKEN  Jenkins API token — generate one under
+                   Jenkins → Your Profile → Configure → API Token
+                   (do NOT use your login password)
+
+All tools accept a full Jenkins URL so the agent never needs to know the
+base URL or job name separately — the user just pastes the URL from their
+browser.  Accepted URL forms:
+
+    Job URL:   https://jenkins.acme.com/job/MyApp/
+    Build URL: https://jenkins.acme.com/job/MyApp/142/
+
+Console logs larger than LOG_TAIL_LINES lines are automatically truncated
+to the last LOG_TAIL_LINES lines so the LLM context is not flooded.
 """
 
+import os
 import json
+import requests
 from framework.tools.decorators import tool
 
+LOG_TAIL_LINES = 200
 
-@tool(description="List recent builds for a Jenkins job with their result and build number.")
-def get_jenkins_builds(job_name: str, limit: int = 5) -> str:
+
+# ── Internal helpers ───────────────────────────────────────────────────────────
+
+def _auth() -> tuple[str, str] | None:
+    """Return (user, token) for Basic Auth, or None if not configured."""
+    user = os.getenv("JENKINS_USER", "")
+    token = os.getenv("JENKINS_TOKEN", "")
+    return (user, token) if user and token else None
+
+
+def _normalize_url(url: str) -> str:
+    """Ensure URL ends with exactly one slash."""
+    return url.rstrip("/") + "/"
+
+
+def _tail(text: str, n: int = LOG_TAIL_LINES) -> str:
+    """
+    Return the last n lines of text.
+    Prepends a truncation notice so the agent knows the log was cut.
+    """
+    lines = text.splitlines()
+    if len(lines) <= n:
+        return text
+    return (
+        f"[Log truncated — showing last {n} of {len(lines)} lines]\n\n"
+        + "\n".join(lines[-n:])
+    )
+
+
+def _extract_causes(actions: list[dict]) -> list[str]:
+    """Pull build trigger descriptions from the actions list."""
+    causes = []
+    for action in actions:
+        for cause in action.get("causes", []):
+            desc = cause.get("shortDescription")
+            if desc:
+                causes.append(desc)
+    return causes
+
+
+def _extract_parameters(actions: list[dict]) -> dict:
+    """Pull build parameters from the actions list."""
+    for action in actions:
+        params = action.get("parameters")
+        if params:
+            return {p["name"]: p.get("value") for p in params if "name" in p}
+    return {}
+
+
+def _extract_test_results(actions: list[dict]) -> dict | None:
+    """Pull test summary from a TestResultAction if present."""
+    for action in actions:
+        if action.get("_class", "").endswith("TestResultAction"):
+            return {
+                "total": action.get("totalCount"),
+                "failed": action.get("failCount"),
+                "skipped": action.get("skipCount"),
+            }
+    return None
+
+
+# ── Tools ──────────────────────────────────────────────────────────────────────
+
+@tool(description=(
+    "List recent builds for a Jenkins job. "
+    "Pass the full Jenkins job URL, e.g. https://jenkins.acme.com/job/MyApp/ "
+    "Returns build numbers, results (SUCCESS/FAILURE/ABORTED), timestamps, and URLs."
+))
+def get_jenkins_builds(job_url: str, limit: int = 5) -> str:
     """Returns JSON with the most recent builds for a Jenkins job."""
-    builds = [
-        {
-            "number": 142,
-            "result": "FAILURE",
-            "duration_ms": 12847,
-            "timestamp": "2024-01-15T10:30:00Z",
-            "branch": "feature/user-service-refactor",
-        },
-        {
-            "number": 141,
-            "result": "SUCCESS",
-            "duration_ms": 165340,
-            "timestamp": "2024-01-15T09:00:00Z",
-            "branch": "main",
-        },
-        {
-            "number": 140,
-            "result": "SUCCESS",
-            "duration_ms": 170210,
-            "timestamp": "2024-01-14T16:45:00Z",
-            "branch": "main",
-        },
-    ]
-    return json.dumps({"job": job_name, "builds": builds[:limit]}, indent=2)
+    base = _normalize_url(job_url)
+    # Jenkins tree API: fetch only the fields we need, capped at `limit` entries
+    api_url = f"{base}api/json"
+    params = {
+        "tree": f"builds[number,result,timestamp,duration,url]{{,{limit}}}"
+    }
+
+    try:
+        resp = requests.get(api_url, auth=_auth(), params=params, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+        return json.dumps(
+            {"job_url": job_url, "builds": data.get("builds", [])},
+            indent=2,
+        )
+    except requests.exceptions.ConnectionError:
+        return json.dumps({"error": f"Cannot reach Jenkins at {job_url}. Check the URL and network connectivity."})
+    except requests.exceptions.HTTPError as e:
+        return json.dumps({"error": f"Jenkins returned HTTP {e.response.status_code}: {e.response.reason}"})
+    except Exception as e:
+        return json.dumps({"error": str(e)})
 
 
-@tool(description="Fetch the full console log output for a specific Jenkins build.")
-def fetch_build_log(job_name: str, build_number: int) -> str:
-    """Returns the raw console text of a Jenkins build."""
-    # Realistic Maven compilation-failure log
-    return f"""Started by GitHub push by john.doe
-[Pipeline] Start of Pipeline
-[Pipeline] node
-Running on jenkins-agent-01 in /workspace/{job_name}
-[Pipeline] {{
-[Pipeline] stage
-[Pipeline] {{ (Checkout)
-Cloning repository https://github.com/acme/{job_name}.git
- > git checkout feature/user-service-refactor
+@tool(description=(
+    "Fetch the console log for a specific Jenkins build. "
+    "Pass the full build URL, e.g. https://jenkins.acme.com/job/MyApp/142/ "
+    "Logs larger than 200 lines are automatically truncated to the last 200 lines."
+))
+def fetch_build_log(build_url: str) -> str:
+    """Returns the raw console text of a Jenkins build (last 200 lines if large)."""
+    base = _normalize_url(build_url)
+    console_url = f"{base}consoleText"
 
-[Pipeline] stage
-[Pipeline] {{ (Build)
-[Pipeline] sh
-+ mvn clean package -DskipTests=false -B
-[INFO] Scanning for projects...
-[INFO] ---------------------------------------------------------
-[INFO] Building {job_name} 2.4.1-SNAPSHOT
-[INFO] ---------------------------------------------------------
-[INFO] --- maven-compiler-plugin:3.11.0:compile (default-compile) ---
-[INFO] Compiling 47 source files to /workspace/{job_name}/target/classes
-[ERROR] COMPILATION ERROR :
-[ERROR] /{job_name}/src/main/java/com/acme/service/UserService.java:[87,32]
-        error: cannot find symbol
-              symbol:   method getUserById(Long)
-              location: interface com.acme.repository.UserRepository
-[ERROR] /{job_name}/src/main/java/com/acme/service/OrderService.java:[134,18]
-        error: incompatible types: found Optional<Order>, required List<Order>
-[ERROR] /{job_name}/src/main/java/com/acme/service/OrderService.java:[156,24]
-        error: cannot find symbol
-              symbol:   method findActiveByUserId(Long)
-              location: class com.acme.repository.OrderRepository
-[INFO] 3 errors
-[INFO] ---------------------------------------------------------
-[INFO] BUILD FAILURE
-[INFO] ---------------------------------------------------------
-[INFO] Total time:  12.847 s
-[INFO] Finished at: 2024-01-15T10:32:47Z
-[INFO] ---------------------------------------------------------
-[ERROR] Failed to execute goal org.apache.maven.plugins:maven-compiler-plugin:3.11.0:compile
-        (default-compile) on project {job_name}: Compilation failure: 3 errors
-[Pipeline] }}
-[Pipeline] End of Pipeline
-Finished: FAILURE"""
+    try:
+        resp = requests.get(console_url, auth=_auth(), timeout=30)
+        resp.raise_for_status()
+        return _tail(resp.text)
+    except requests.exceptions.ConnectionError:
+        return f"Cannot reach Jenkins at {build_url}. Check the URL and network connectivity."
+    except requests.exceptions.HTTPError as e:
+        return f"Jenkins returned HTTP {e.response.status_code}: {e.response.reason}"
+    except Exception as e:
+        return str(e)
 
 
-@tool(description="Get metadata for a Jenkins build: parameters, trigger cause, test results.")
-def get_build_info(job_name: str, build_number: int) -> str:
+@tool(description=(
+    "Get metadata for a Jenkins build: trigger cause, parameters, test results, and changeset. "
+    "Pass the full build URL, e.g. https://jenkins.acme.com/job/MyApp/142/"
+))
+def get_build_info(build_url: str) -> str:
     """Returns JSON with build metadata including parameters and test results."""
-    return json.dumps(
-        {
-            "job": job_name,
-            "number": build_number,
-            "result": "FAILURE",
-            "duration_ms": 12847,
-            "url": f"https://jenkins.acme.com/job/{job_name}/{build_number}/",
-            "triggered_by": "Push to branch 'feature/user-service-refactor' by john.doe",
-            "parameters": {
-                "BRANCH": "feature/user-service-refactor",
-                "DEPLOY_ENV": "staging",
-                "SKIP_TESTS": "false",
-            },
-            "test_results": None,   # compilation failed before tests ran
-            "artifacts": [],
+    base = _normalize_url(build_url)
+    api_url = f"{base}api/json"
+
+    try:
+        resp = requests.get(api_url, auth=_auth(), timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+        actions = data.get("actions", [])
+
+        info = {
+            "url": data.get("url"),
+            "number": data.get("number"),
+            "result": data.get("result"),
+            "duration_ms": data.get("duration"),
+            "timestamp": data.get("timestamp"),
+            "triggered_by": _extract_causes(actions),
+            "parameters": _extract_parameters(actions),
+            "test_results": _extract_test_results(actions),
             "changes": [
                 {
-                    "author": "john.doe",
-                    "message": "Refactor UserService to use new repository interface",
-                    "files_changed": [
-                        "src/main/java/com/acme/service/UserService.java",
-                        "src/main/java/com/acme/service/OrderService.java",
-                    ],
+                    "author": change.get("author", {}).get("fullName"),
+                    "message": change.get("msg"),
+                    "files_changed": change.get("affectedPaths", []),
                 }
+                for changeset in data.get("changeSets", [])
+                for change in changeset.get("items", [])
             ],
-        },
-        indent=2,
-    )
+        }
+        return json.dumps(info, indent=2)
+    except requests.exceptions.ConnectionError:
+        return json.dumps({"error": f"Cannot reach Jenkins at {build_url}. Check the URL and network connectivity."})
+    except requests.exceptions.HTTPError as e:
+        return json.dumps({"error": f"Jenkins returned HTTP {e.response.status_code}: {e.response.reason}"})
+    except Exception as e:
+        return json.dumps({"error": str(e)})

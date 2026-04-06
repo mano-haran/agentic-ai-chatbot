@@ -19,6 +19,10 @@ from langchain_core.language_models import BaseChatModel
 
 import config
 from config import ModelResolution
+from framework.providers.token_logger import TokenUsageLogger
+
+# Single shared instance — stateless, safe to reuse across all LLM calls.
+_token_logger = TokenUsageLogger()
 
 
 def get_llm(
@@ -70,7 +74,8 @@ def _build_anthropic(r: ModelResolution, temperature: float, max_tokens: int, **
     except ImportError as e:
         raise ImportError("Run: pip install langchain-anthropic") from e
 
-    init: dict = dict(model=r.name, temperature=temperature, max_tokens=max_tokens, **kwargs)
+    init: dict = dict(model=r.name, temperature=temperature, max_tokens=max_tokens,
+                      callbacks=[_token_logger], **kwargs)
     if r.api_key:
         init["api_key"] = r.api_key
     if r.base_url:
@@ -85,7 +90,8 @@ def _build_openai(r: ModelResolution, temperature: float, max_tokens: int, **kwa
     except ImportError as e:
         raise ImportError("Run: pip install langchain-openai") from e
 
-    init: dict = dict(model=r.name, temperature=temperature, max_tokens=max_tokens, **kwargs)
+    init: dict = dict(model=r.name, temperature=temperature, max_tokens=max_tokens,
+                      callbacks=[_token_logger], **kwargs)
     if r.api_key:
         init["api_key"] = r.api_key
     if r.base_url:
@@ -115,6 +121,7 @@ def _build_azure(r: ModelResolution, temperature: float, max_tokens: int, **kwar
         api_version=r.extra.get("api_version", "2024-02-01"),
         temperature=temperature,
         max_tokens=max_tokens,
+        callbacks=[_token_logger],
         **kwargs,
     )
 
@@ -125,7 +132,8 @@ def _build_google(r: ModelResolution, temperature: float, max_tokens: int, **kwa
     except ImportError as e:
         raise ImportError("Run: pip install langchain-google-genai") from e
 
-    init: dict = dict(model=r.name, temperature=temperature, max_output_tokens=max_tokens, **kwargs)
+    init: dict = dict(model=r.name, temperature=temperature, max_output_tokens=max_tokens,
+                      callbacks=[_token_logger], **kwargs)
     if r.api_key:
         init["google_api_key"] = r.api_key
     if r.base_url:

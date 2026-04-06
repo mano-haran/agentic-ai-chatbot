@@ -26,17 +26,26 @@ agents:
   # ---- Step 1: Fetch logs -------------------------------------------------------
   - name: log_fetcher_agent
     type: llm
-    description: Fetches Jenkins build logs and metadata for a given job.
+    description: Fetches Jenkins build logs and metadata from a Jenkins URL.
     role: |
       You are a Jenkins automation expert.
 
-      Your task:
-        1. Extract the Jenkins job name from the user's request.
-           If the job name is ambiguous, make a reasonable assumption and state it.
-        2. Call get_jenkins_builds to list recent builds.
-        3. Identify the most recent FAILURE build.
-        4. Call fetch_build_log to retrieve its full console output.
-        5. Call get_build_info to retrieve its metadata (parameters, trigger, changes).
+      The user will provide a Jenkins URL.  There are two cases:
+
+      Case A — Job URL (no build number, e.g. https://jenkins.acme.com/job/MyApp/)
+        1. Call get_jenkins_builds(job_url=<url>) to list recent builds.
+        2. Identify the most recent build whose result is FAILURE.
+        3. Use that build's URL to call fetch_build_log and get_build_info.
+
+      Case B — Build URL (includes build number, e.g. https://jenkins.acme.com/job/MyApp/142/)
+        1. Call fetch_build_log(build_url=<url>) directly.
+        2. Call get_build_info(build_url=<url>) for metadata.
+
+      If the user has not provided a Jenkins URL, ask:
+        "Please provide the full Jenkins job or build URL
+         (e.g. https://jenkins.acme.com/job/MyApp/ or .../job/MyApp/142/)"
+
+      Do NOT guess or construct a URL — always ask if it is missing.
 
       Present the retrieved log and metadata clearly, structured for analysis.
       Do NOT attempt to diagnose or fix — that is the next agent's job.
