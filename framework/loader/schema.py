@@ -13,6 +13,9 @@ class ToolRef(BaseModel):
 
 class AgentSchema(BaseModel):
     name: str
+    display_name: str = ""   # human-readable label shown in the task list UI;
+                             # falls back to `name` if omitted
+
     type: Literal["llm", "sequential", "parallel", "loop", "router"] = "llm"
 
     # LLMAgent fields
@@ -38,6 +41,8 @@ class IntentSchema(BaseModel):
 class WorkflowFileSchema(BaseModel):
     """Top-level schema for a workflow YAML file."""
     name: str
+    display_name: str = ""   # human-readable label shown in the chat window and task list;
+                             # falls back to `name` if omitted
     description: str
     version: str = "1.0"
     entry_agent: str                                        # name of the root agent

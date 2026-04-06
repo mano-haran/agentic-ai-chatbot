@@ -47,6 +47,7 @@ class YAMLLoader:
         entry = built[schema.entry_agent]
         return Workflow(
             name=schema.name,
+            display_name=schema.display_name,
             description=schema.description,
             entry_agent=entry,
             intents=[i.model_dump() for i in schema.intents],
@@ -76,6 +77,7 @@ class YAMLLoader:
             case "llm":
                 agent = LLMAgent(
                     name=schema.name,
+                    display_name=schema.display_name,
                     role=schema.role or "",
                     model=schema.model,
                     tools=agent_tools,
@@ -88,12 +90,14 @@ class YAMLLoader:
             case "sequential":
                 agent = SequentialAgent(
                     name=schema.name,
+                    display_name=schema.display_name,
                     sub_agents=sub_agents,
                     description=schema.description,
                 )
             case "parallel":
                 agent = ParallelAgent(
                     name=schema.name,
+                    display_name=schema.display_name,
                     sub_agents=sub_agents,
                     description=schema.description,
                 )
@@ -102,6 +106,7 @@ class YAMLLoader:
                     raise ValueError(f"LoopAgent '{schema.name}' needs exactly one sub-agent.")
                 agent = LoopAgent(
                     name=schema.name,
+                    display_name=schema.display_name,
                     sub_agent=sub_agents[0],
                     max_iterations=schema.max_iterations,
                     description=schema.description,
@@ -109,6 +114,7 @@ class YAMLLoader:
             case "router":
                 agent = RouterAgent(
                     name=schema.name,
+                    display_name=schema.display_name,
                     sub_agents=sub_agents,
                     model=schema.model,
                     description=schema.description,

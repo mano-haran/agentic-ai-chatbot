@@ -17,8 +17,8 @@ class SequentialAgent(BaseAgent):
     Graph shape:  sub_agent_0 → sub_agent_1 → … → sub_agent_N → END
     """
 
-    def __init__(self, name: str, sub_agents: list[BaseAgent], description: str = ""):
-        super().__init__(name, description)
+    def __init__(self, name: str, sub_agents: list[BaseAgent], description: str = "", display_name: str = ""):
+        super().__init__(name, description, display_name)
         if not sub_agents:
             raise ValueError(f"SequentialAgent '{name}' requires at least one sub-agent.")
         self.sub_agents = sub_agents
@@ -66,8 +66,8 @@ class ParallelAgent(BaseAgent):
                   (fan-out/fan-in happens inside the node via asyncio)
     """
 
-    def __init__(self, name: str, sub_agents: list[BaseAgent], description: str = ""):
-        super().__init__(name, description)
+    def __init__(self, name: str, sub_agents: list[BaseAgent], description: str = "", display_name: str = ""):
+        super().__init__(name, description, display_name)
         if not sub_agents:
             raise ValueError(f"ParallelAgent '{name}' requires at least one sub-agent.")
         self.sub_agents = sub_agents
@@ -116,8 +116,9 @@ class LoopAgent(BaseAgent):
         sub_agent: BaseAgent,
         max_iterations: int = 5,
         description: str = "",
+        display_name: str = "",
     ):
-        super().__init__(name, description)
+        super().__init__(name, description, display_name)
         self.sub_agent = sub_agent
         self.max_iterations = max_iterations
 

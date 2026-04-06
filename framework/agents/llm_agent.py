@@ -45,10 +45,11 @@ class LLMAgent(BaseAgent):
         sub_agents: list[BaseAgent] | None = None,
         max_iterations: int = 10,
         description: str = "",
+        display_name: str = "",
         temperature: float = 0.0,
         max_tokens: int = config.MAX_TOKENS_HARD_LIMIT,
     ):
-        super().__init__(name, description or role[:120])
+        super().__init__(name, description or role[:120], display_name)
         self.role = role
         self.model = model
         self._tools: list[StructuredTool] = tools or []

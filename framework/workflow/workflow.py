@@ -101,8 +101,10 @@ class Workflow:
         description: str,
         entry_agent: BaseAgent,
         intents: list[dict[str, str]] | None = None,
+        display_name: str = "",
     ):
         self.name = name
+        self.display_name = display_name or name   # falls back to internal name if not set
         self.description = description
         self.entry_agent = entry_agent
         self.intents: list[dict[str, str]] = intents or []
@@ -111,13 +113,23 @@ class Workflow:
 
     def steps(self) -> list[str]:
         """
-        Return the ordered list of agent step names for progress tracking.
+        Return the ordered list of internal agent names for progress tracking.
         For a SequentialAgent entry point, returns each sub-agent name in order.
         For any other agent type, returns the single entry agent name.
         """
         if isinstance(self.entry_agent, SequentialAgent):
             return [a.name for a in self.entry_agent.sub_agents]
         return [self.entry_agent.name]
+
+    def agent_display_names(self) -> dict[str, str]:
+        """
+        Map each internal agent name to its display_name for the task list UI.
+        Internal names are used as dict keys throughout the workflow; display
+        names are the human-readable labels shown in the Chainlit sidebar.
+        """
+        if isinstance(self.entry_agent, SequentialAgent):
+            return {a.name: a.display_name for a in self.entry_agent.sub_agents}
+        return {self.entry_agent.name: self.entry_agent.display_name}
 
     def _config(self, thread_id: str) -> dict:
         return {"configurable": {"thread_id": thread_id}}

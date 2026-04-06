@@ -74,9 +74,10 @@ class BaseAgent(ABC):
                        (SequentialAgent, ParallelAgent, LoopAgent, RouterAgent).
     """
 
-    def __init__(self, name: str, description: str = ""):
+    def __init__(self, name: str, description: str = "", display_name: str = ""):
         self.name = name
         self.description = description
+        self.display_name = display_name or name   # falls back to internal name if not set
         self._graph = None
 
     @abstractmethod

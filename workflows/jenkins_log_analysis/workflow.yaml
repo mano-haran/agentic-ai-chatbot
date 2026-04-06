@@ -1,4 +1,5 @@
 name: jenkins_log_analysis
+display_name: Jenkins Log Analysis
 description: >
   Analyse Jenkins build failures end-to-end: fetch logs, diagnose the root cause,
   and provide specific actionable fixes with code examples.
@@ -25,6 +26,7 @@ agents:
 
   # ---- Step 1: Fetch logs -------------------------------------------------------
   - name: log_fetcher_agent
+    display_name: Fetch Build Logs
     type: llm
     description: Fetches Jenkins build logs and metadata from a Jenkins URL.
     role: |
@@ -58,6 +60,7 @@ agents:
 
   # ---- Step 2: Analyse failure -------------------------------------------------
   - name: log_analyzer_agent
+    display_name: Analyse Failure
     type: llm
     description: Analyses Jenkins build logs to classify failures and identify root causes.
     role: |
@@ -89,6 +92,7 @@ agents:
 
   # ---- Step 3: Suggest fixes ---------------------------------------------------
   - name: fix_suggester_agent
+    display_name: Suggest Fixes
     type: llm
     description: Suggests specific, actionable fixes for the diagnosed build failure.
     role: |
@@ -118,6 +122,7 @@ agents:
 
   # ---- Orchestrator: sequential pipeline ---------------------------------------
   - name: jenkins_analysis_pipeline
+    display_name: Jenkins Analysis Pipeline
     type: sequential
     description: >
       Full Jenkins log analysis pipeline:

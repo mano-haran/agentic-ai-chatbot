@@ -71,8 +71,8 @@ def _build_fallback_workflow(workflows: dict[str, Workflow]) -> Workflow:
     specialized workflows are available and can guide users toward them.
     """
     descriptions = "\n".join(
-        f"  • {name}: {wf.description}"
-        for name, wf in workflows.items()
+        f"  • {wf.display_name}: {wf.description}"
+        for wf in workflows.values()
     )
     role = f"""You are a DevOps AI assistant with the following specialized capabilities:
 
@@ -91,12 +91,14 @@ Guidelines:
 
     agent = LLMAgent(
         name=_FALLBACK_NAME,
+        display_name="General Assistant",
         description="General assistant for questions not covered by specialized workflows.",
         role=role,
         tools=[],
     )
     return Workflow(
         name=_FALLBACK_NAME,
+        display_name="General Assistant",
         description="General assistant",
         entry_agent=agent,
     )
@@ -119,7 +121,7 @@ async def on_chat_start() -> None:
     cl.user_session.set("history", [])
     cl.user_session.set("awaiting_clarification", False)
 
-    lines = [f"- **{n}**: {w.description}" for n, w in _workflows.items() if n != _FALLBACK_NAME]
+    lines = [f"- **{w.display_name}**: {w.description}" for w in _workflows.values() if w.name != _FALLBACK_NAME]
     capabilities = "\n".join(lines) if lines else "_No workflows loaded._"
     await cl.Message(
         content=(
@@ -211,7 +213,7 @@ async def on_message(message: cl.Message) -> None:
     switched = current_workflow is not None and workflow_name != current_workflow
     if switched:
         await cl.Message(
-            content=f"*Switching topic → **{workflow_name}***",
+            content=f"*Switching topic → **{workflow.display_name}***",
             author="router",
         ).send()
 
@@ -223,11 +225,12 @@ async def on_message(message: cl.Message) -> None:
     # Build TaskList with all steps in READY state up front.
     # A new TaskList object is created every turn so the sidebar shows a clean
     # slate for the current run (not the icon states from a prior run).
+    display_names = workflow.agent_display_names()
     task_list = TaskList()
-    task_list.status = f"Workflow: {workflow_name}"
+    task_list.status = workflow.display_name
     tasks: dict[str, Task] = {}
     for name in step_names:
-        task = Task(title=f"Agent: {name}", status=TaskStatus.READY)
+        task = Task(title=display_names.get(name, name), status=TaskStatus.READY)
         tasks[name] = task
         await task_list.add_task(task)
     await task_list.send()

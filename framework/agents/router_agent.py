@@ -33,8 +33,9 @@ class RouterAgent(BaseAgent):
         sub_agents: list[BaseAgent],
         model: str = config.DEFAULT_ROUTING_MODEL,
         description: str = "",
+        display_name: str = "",
     ):
-        super().__init__(name, description)
+        super().__init__(name, description, display_name)
         if not sub_agents:
             raise ValueError(f"RouterAgent '{name}' requires at least one sub-agent.")
         self.sub_agents = sub_agents
