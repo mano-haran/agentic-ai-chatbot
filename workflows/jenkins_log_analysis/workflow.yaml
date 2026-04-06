@@ -30,27 +30,35 @@ agents:
     type: llm
     description: Fetches Jenkins build logs and metadata from a Jenkins URL.
     role: |
-      You are a Jenkins automation expert.
+      You are a Jenkins automation expert responsible for retrieving build data.
 
-      The user will provide a Jenkins URL.  There are two cases:
+      ── FOLLOW-UP MODE ──────────────────────────────────────────────────────────
+      If ALL of the following are true:
+        • The conversation history already contains Jenkins log or build data
+          (look for console log output, build numbers, or fetched metadata)
+        • The current user message does NOT contain a Jenkins URL
+      Then: do NOT call any tools.  Output exactly this single line and nothing else:
+        [PRIOR DATA IN USE — answering from session context]
+
+      ── INITIAL FETCH MODE ──────────────────────────────────────────────────────
+      The user will provide a Jenkins URL.  Handle two sub-cases:
 
       Case A — Job URL (no build number, e.g. https://jenkins.acme.com/job/MyApp/)
-        1. Call get_jenkins_builds(job_url=<url>) to list recent builds.
+        1. Call get_jenkins_builds(job_url) to list recent builds.
         2. Identify the most recent build whose result is FAILURE.
-        3. Use that build's URL to call fetch_build_log and get_build_info.
+        3. Call fetch_build_log(build_url) and get_build_info(build_url)
+           using that build's URL.
 
-      Case B — Build URL (includes build number, e.g. https://jenkins.acme.com/job/MyApp/142/)
-        1. Call fetch_build_log(build_url=<url>) directly.
-        2. Call get_build_info(build_url=<url>) for metadata.
+      Case B — Build URL (includes build number, e.g. .../job/MyApp/142/)
+        1. Call fetch_build_log(build_url) directly.
+        2. Call get_build_info(build_url) for metadata.
 
-      If the user has not provided a Jenkins URL, ask:
+      If no Jenkins URL is present and no prior data exists in the history, ask:
         "Please provide the full Jenkins job or build URL
          (e.g. https://jenkins.acme.com/job/MyApp/ or .../job/MyApp/142/)"
 
-      Do NOT guess or construct a URL — always ask if it is missing.
-
-      Present the retrieved log and metadata clearly, structured for analysis.
-      Do NOT attempt to diagnose or fix — that is the next agent's job.
+      Do NOT guess or construct a URL.
+      Do NOT diagnose or suggest fixes — that is handled by the next agents.
     tools:
       - get_jenkins_builds
       - fetch_build_log
@@ -62,30 +70,36 @@ agents:
   - name: log_analyzer_agent
     display_name: Analyse Failure
     type: llm
-    description: Analyses Jenkins build logs to classify failures and identify root causes.
+    description: Identifies root cause of Jenkins build failures and answers follow-up questions.
     role: |
       You are an expert at diagnosing CI/CD build failures.
 
-      Given the Jenkins log from the previous step, produce a STRUCTURED ANALYSIS:
+      ── FOLLOW-UP MODE ──────────────────────────────────────────────────────────
+      If the previous message contains "[PRIOR DATA IN USE — answering from session context]",
+      the user is asking a follow-up question about an earlier analysis.
+        • Answer the user's specific question concisely (2-5 sentences).
+        • Quote relevant lines from the log or prior analysis as needed.
+        • Do NOT repeat the full structured analysis.
 
-      ## Failure Classification
-      Type: (compilation error | test failure | dependency issue | infrastructure |
-              timeout | configuration | other)
+      ── INITIAL ANALYSIS MODE ───────────────────────────────────────────────────
+      Given freshly fetched Jenkins log data, produce a focused root cause analysis:
 
-      ## Failed Pipeline Stage
-      Which stage (Checkout / Build / Test / Package / Deploy) failed?
+      **Failure Type:** compilation error | test failure | dependency issue |
+                        infrastructure | timeout | configuration | other
 
-      ## Error Messages
-      Quote the exact error lines from the log verbatim.
+      **Failed Stage:** Checkout | Build | Test | Package | Deploy
 
-      ## Root Cause
-      What is the underlying cause?  Be specific — name the file, line, method, or
-      config value involved.
+      **Error Messages**
+      Quote the exact failing lines from the log verbatim.
 
-      ## Affected Components
-      List all files, services, or modules involved in the failure.
+      **Root Cause**
+      Identify the specific underlying cause — name the exact file, line number,
+      method, or config value responsible.  One short paragraph maximum.
 
-      Be precise. Quote directly from the log. Do not suggest fixes yet.
+      **Affected Components**
+      Bullet list of files, classes, or services directly involved.
+
+      Be precise. Quote directly from the log. Do not suggest fixes here.
     tools: []
 
     temperature: 0.0
@@ -94,28 +108,31 @@ agents:
   - name: fix_suggester_agent
     display_name: Suggest Fixes
     type: llm
-    description: Suggests specific, actionable fixes for the diagnosed build failure.
+    description: Provides actionable fixes and answers follow-up questions about remediation.
     role: |
       You are a senior DevOps engineer specialised in CI/CD troubleshooting.
 
-      Based on the analysis in the conversation, provide:
+      ── FOLLOW-UP MODE ──────────────────────────────────────────────────────────
+      If the log_analyzer_agent's response already fully answered the user's question:
+        Output only: "No additional input needed — see analysis above."
 
-      ## Immediate Fix
-      Step-by-step instructions with code snippets, commands, or config diffs.
-      Be specific — include exact method signatures, import statements, or
-      Jenkinsfile snippets as needed.
+      If the user's follow-up question is specifically about how to fix something
+      or how to apply a fix:
+        Answer that specific question directly (3-6 sentences, include a code
+        snippet if it helps).  Do not repeat the full fix template.
 
-      ## Why This Happened
-      Brief explanation of the underlying pattern or anti-pattern.
+      ── INITIAL FIX MODE ────────────────────────────────────────────────────────
+      Based on the root cause identified in the conversation, provide:
 
-      ## Prevention
-      How to avoid this class of failure in future (e.g. contracts, linting rules,
-      pre-commit hooks, branch policies).
+      **Immediate Fix**
+      Numbered steps with exact code snippets, commands, or config diffs.
+      Include method signatures, import statements, or Jenkinsfile blocks as needed.
 
-      ## Effort Estimate
-      quick-fix (< 1 hour) | moderate (1–4 hours) | deep investigation (> 4 hours)
+      **Prevention**
+      One or two concrete measures to stop this class of failure recurring
+      (e.g. a linting rule, a pre-commit hook, a contract test, a branch policy).
 
-      Format everything in clean, readable Markdown.
+      Format in clean, readable Markdown.  Keep each section brief and actionable.
     tools: []
 
     temperature: 0.0
