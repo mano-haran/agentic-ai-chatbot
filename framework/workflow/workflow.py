@@ -1,6 +1,7 @@
 from typing import Any, AsyncGenerator, AsyncIterator
-from langchain_core.messages import HumanMessage, AIMessage, BaseMessage
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, BaseMessage
 
+import config
 from framework.agents.base import BaseAgent
 from framework.agents.workflow_agents import SequentialAgent
 from framework.core.checkpointer import get_checkpointer
@@ -48,9 +49,6 @@ def extract_history(result: dict[str, Any]) -> list[BaseMessage]:
     These kept messages form the `history` passed into the next turn, giving
     every agent in subsequent runs full awareness of prior exchanges.
 
-    Note: For very long conversations you may want to trim this list to the
-    last N messages to stay within model context limits. A good starting point
-    is keeping the last 20 messages (~10 user/assistant exchange pairs).
     """
     kept: list[BaseMessage] = []
     for m in result.get("messages", []):
@@ -59,6 +57,134 @@ def extract_history(result: dict[str, Any]) -> list[BaseMessage]:
         elif isinstance(m, AIMessage) and not getattr(m, "tool_calls", None):
             kept.append(m)
     return kept
+
+
+def compact_history(messages: list[BaseMessage]) -> list[BaseMessage]:
+    """
+    Apply the configured history compaction strategy to the extracted history.
+
+    Strategy is controlled by HISTORY_STRATEGY in .env (default: "none"):
+
+      none    — return messages unchanged; history grows unbounded.
+                Safe default: no risk of losing context, no extra LLM calls.
+
+      window  — keep only the most recent HISTORY_WINDOW_SIZE messages.
+                Zero cost. Older context is hard-dropped, so very long
+                investigations may lose early details.
+
+      summary — if the history exceeds HISTORY_WINDOW_SIZE messages, ask the
+                LLM to write a concise prose summary of the older portion, then
+                return [SystemMessage(summary)] + the recent tail.
+                Preserves semantic context at the cost of one extra LLM call
+                whenever the threshold is crossed.
+
+    Always call this on the output of extract_history(), never on raw state
+    messages (ToolMessages and intermediate AIMessages should be filtered first).
+    """
+    strategy = config.HISTORY_STRATEGY.lower()
+
+    if strategy == "none" or len(messages) == 0:
+        return messages
+
+    if strategy == "window":
+        return _apply_window(messages)
+
+    if strategy == "summary":
+        return _apply_summary(messages)
+
+    # Unknown strategy — log a warning and fall back to no-op
+    print(
+        f"[history] Unknown HISTORY_STRATEGY='{strategy}'. "
+        "Valid values: none, window, summary. Falling back to 'none'.",
+        flush=True,
+    )
+    return messages
+
+
+# ── Strategy implementations ───────────────────────────────────────────────────
+
+def _apply_window(messages: list[BaseMessage]) -> list[BaseMessage]:
+    """
+    Keep only the last HISTORY_WINDOW_SIZE messages.
+
+    The window always starts on a HumanMessage so the conversation begins
+    with a user turn rather than a dangling assistant response.
+    """
+    n = config.HISTORY_WINDOW_SIZE
+    if len(messages) <= n:
+        return messages
+
+    tail = messages[-n:]
+
+    # Advance past any leading AIMessage so the window starts with a user turn
+    for i, m in enumerate(tail):
+        if isinstance(m, HumanMessage):
+            tail = tail[i:]
+            break
+
+    print(
+        f"[history] window: kept {len(tail)} of {len(messages)} messages "
+        f"(window={n})",
+        flush=True,
+    )
+    return tail
+
+
+def _apply_summary(messages: list[BaseMessage]) -> list[BaseMessage]:
+    """
+    Summarise the older portion of the history with an LLM call when it
+    exceeds HISTORY_WINDOW_SIZE messages, then return:
+        [SystemMessage(<summary>)] + <recent tail>
+
+    The recent tail is the last (HISTORY_WINDOW_SIZE // 2) messages so the
+    LLM always has direct access to the most recent exchange in full.
+
+    If the history is within the window limit, returns it unchanged — no LLM
+    call is made.
+    """
+    n = config.HISTORY_WINDOW_SIZE
+    if len(messages) <= n:
+        return messages
+
+    # Split: everything older than the recent tail gets summarised
+    tail_size = max(n // 2, 2)          # at least 2 messages kept verbatim
+    older = messages[:-tail_size]
+    recent = messages[-tail_size:]
+
+    # Format older messages as readable text for the summarisation prompt
+    older_text = "\n".join(
+        f"{'User' if isinstance(m, HumanMessage) else 'Assistant'}: "
+        f"{m.content[:500]}"          # cap per-message length to avoid inception
+        for m in older
+        if isinstance(m, (HumanMessage, AIMessage))
+    )
+
+    prompt = (
+        "Summarise the following conversation excerpt concisely in 3-6 sentences. "
+        "Capture the key questions asked, decisions made, and any important facts "
+        "established.  Write in the third person (e.g. 'The user asked…').\n\n"
+        f"{older_text}"
+    )
+
+    try:
+        from framework.providers.factory import get_llm
+        llm = get_llm(model_id=config.HISTORY_SUMMARY_MODEL, temperature=0.0, max_tokens=512)
+        response = llm.invoke([HumanMessage(content=prompt)])
+        summary_text = f"[Earlier conversation summary]\n{response.content.strip()}"
+        print(
+            f"[history] summary: condensed {len(older)} older messages into a summary, "
+            f"kept {len(recent)} recent messages verbatim",
+            flush=True,
+        )
+        return [SystemMessage(content=summary_text)] + list(recent)
+    except Exception as exc:
+        # If summarisation fails for any reason, fall back to window to avoid
+        # passing an oversized history that could blow the context limit
+        print(
+            f"[history] summary failed ({exc}); falling back to window strategy",
+            flush=True,
+        )
+        return _apply_window(messages)
 
 
 class Workflow:

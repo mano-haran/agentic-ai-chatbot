@@ -26,6 +26,21 @@ def clamp_tokens(requested: int) -> int:
 APP_ENV: str = os.getenv("APP_ENV", "dev")          # "dev" | "prod"
 POSTGRES_URL: str = os.getenv("POSTGRES_URL", "")   # only needed in prod
 
+# ── History compaction ─────────────────────────────────────────────────────────
+# Controls how the conversation history is trimmed after each workflow run.
+#
+#   none    — no trimming; history grows unbounded (default)
+#   window  — keep only the last HISTORY_WINDOW_SIZE messages
+#   summary — condense older messages into a single summary using an LLM call,
+#             then prepend the summary as context for the next turn
+#
+# "none" is the safe default: it matches the original behaviour and avoids any
+# risk of losing context on short conversations.  Switch to "window" or "summary"
+# when conversations grow long enough to approach the model's context limit.
+HISTORY_STRATEGY: str = os.getenv("HISTORY_STRATEGY", "none")   # none | window | summary
+HISTORY_WINDOW_SIZE: int = int(os.getenv("HISTORY_WINDOW_SIZE", "20"))
+HISTORY_SUMMARY_MODEL: str = os.getenv("HISTORY_SUMMARY_MODEL", DEFAULT_ROUTING_MODEL)
+
 # ── Tool integrations ──────────────────────────────────────────────────────────
 JENKINS_URL: str = os.getenv("JENKINS_URL", "http://localhost:8080")
 JENKINS_USER: str = os.getenv("JENKINS_USER", "")

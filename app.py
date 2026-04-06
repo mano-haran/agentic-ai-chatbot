@@ -45,7 +45,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from framework.agents.llm_agent import LLMAgent
 from framework.loader.yaml_loader import YAMLLoader
 from framework.workflow.intent_router import IntentRouter, RoutingDecision
-from framework.workflow.workflow import Workflow, extract_history
+from framework.workflow.workflow import Workflow, extract_history, compact_history
 
 # ── Load workflows ─────────────────────────────────────────────────────────────
 
@@ -330,8 +330,8 @@ async def on_message(message: cl.Message) -> None:
     # workflow would never receive the information it asked for.
     if result.get("clarification_needed"):
         cl.user_session.set("awaiting_clarification", True)
-        cl.user_session.set("history", extract_history(result))
+        cl.user_session.set("history", compact_history(extract_history(result)))
         return
 
     # ── 9. Persist clean history ─────────────────────────────────────────────────
-    cl.user_session.set("history", extract_history(result))
+    cl.user_session.set("history", compact_history(extract_history(result)))
