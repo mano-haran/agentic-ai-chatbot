@@ -2,10 +2,10 @@
 Application logger.
 
 Provides a singleton `logger` object with severity-based methods:
-    logger.debug(category, message, **data)
-    logger.info(category, message, **data)
-    logger.warning(category, message, **data)
-    logger.error(category, message, exc=None, **data)
+    logger.debug(category, msg, **data)
+    logger.info(category, msg, **data)
+    logger.warning(category, msg, **data)
+    logger.error(category, msg, exc=None, **data)
 
 Controlled by LOG_LEVEL in .env:
     OFF      — no output (default)
@@ -99,39 +99,41 @@ class AppLogger:
 
     # ── Public severity methods ───────────────────────────────────────────────
 
-    def debug(self, category: str, message: str, **data) -> None:
+    def debug(self, category: str, msg: str, **data) -> None:
         """Log a DEBUG-level entry. Visible when LOG_LEVEL=DEBUG."""
         self._init()
         if self._log.isEnabledFor(logging.DEBUG):
-            self._log.debug(self._format("DEBUG", category, message, data))
+            self._log.debug(self._format("DEBUG", category, msg, data))
 
-    def info(self, category: str, message: str, **data) -> None:
+    def info(self, category: str, msg: str, **data) -> None:
         """Log an INFO-level entry. Visible when LOG_LEVEL=INFO or DEBUG."""
         self._init()
         if self._log.isEnabledFor(logging.INFO):
-            self._log.info(self._format("INFO", category, message, data))
+            self._log.info(self._format("INFO", category, msg, data))
 
-    def warning(self, category: str, message: str, **data) -> None:
+    def warning(self, category: str, msg: str, **data) -> None:
         """Log a WARNING-level entry. Visible when LOG_LEVEL=WARNING, INFO, or DEBUG."""
         self._init()
         if self._log.isEnabledFor(logging.WARNING):
-            self._log.warning(self._format("WARNING", category, message, data))
+            self._log.warning(self._format("WARNING", category, msg, data))
 
-    def error(self, category: str, message: str, exc: Exception | None = None, **data) -> None:
+    def error(self, category: str, msg: str, exc: Exception | None = None, **data) -> None:
         """
         Log an ERROR-level entry. Visible when LOG_LEVEL=ERROR, WARNING, INFO, or DEBUG.
 
         Args:
             category: Short uppercase label (e.g. ERROR, WORKFLOW, AGENT).
-            message:  Description of what went wrong.
+            msg:      Description of what went wrong.
             exc:      Optional exception — when supplied, the full traceback
                       is appended to the log entry.
-            **data:   Additional key=value context.
+            **data:   Additional key=value context. Any key name is allowed,
+                      including 'message', since it no longer conflicts with
+                      a parameter name.
         """
         self._init()
         if not self._log.isEnabledFor(logging.ERROR):
             return
-        line = self._format("ERROR", category, message, data)
+        line = self._format("ERROR", category, msg, data)
         if exc is not None:
             tb = traceback.format_exc()
             line += f"\n  exception={exc!r}\n{tb}"
