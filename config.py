@@ -41,6 +41,16 @@ HISTORY_STRATEGY: str = os.getenv("HISTORY_STRATEGY", "none")   # none | window 
 HISTORY_WINDOW_SIZE: int = int(os.getenv("HISTORY_WINDOW_SIZE", "20"))
 HISTORY_SUMMARY_MODEL: str = os.getenv("HISTORY_SUMMARY_MODEL", DEFAULT_ROUTING_MODEL)
 
+# ── Logging ────────────────────────────────────────────────────────────────────
+# LOG_LEVEL controls which messages are written to LOG_FILE.
+#   OFF     — no logging (default)
+#   ERROR   — errors only
+#   WARNING — warnings + errors
+#   INFO    — info + warnings + errors
+#   DEBUG   — everything (routing decisions, agent steps, LLM calls, responses)
+LOG_LEVEL: str = os.getenv("LOG_LEVEL", "OFF").upper()
+LOG_FILE: str = os.getenv("LOG_FILE", "app.log")
+
 # ── Tool integrations ──────────────────────────────────────────────────────────
 JENKINS_URL: str = os.getenv("JENKINS_URL", "http://localhost:8080")
 JENKINS_USER: str = os.getenv("JENKINS_USER", "")

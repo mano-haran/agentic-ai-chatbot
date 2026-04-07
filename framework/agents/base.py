@@ -3,6 +3,8 @@ from typing import Any, AsyncIterator
 from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.graph import StateGraph
 
+from framework.core.log import logger
+
 
 def make_agent_node(agent: "BaseAgent"):
     """
@@ -34,7 +36,13 @@ def make_agent_node(agent: "BaseAgent"):
     """
     async def node(state: dict[str, Any]) -> dict[str, Any]:
         msgs_before = len(state.get("messages", []))
-        result = await agent.compile().ainvoke(state)
+        logger.debug("AGENT", "start", agent=agent.name, msg_count=msgs_before)
+
+        try:
+            result = await agent.compile().ainvoke(state)
+        except Exception as exc:
+            logger.error("AGENT", f"agent '{agent.name}' raised during ainvoke", exc=exc)
+            raise
 
         # Find the last AI message added during this step.
         new_msgs = result.get("messages", [])[msgs_before:]
@@ -45,15 +53,30 @@ def make_agent_node(agent: "BaseAgent"):
         # a final response (with or without having used tools earlier in the step).
         has_pending_tool_calls = bool(getattr(last_ai, "tool_calls", None)) if last_ai else False
 
+        # content may be a list (Anthropic content blocks) — normalise to str for logging.
+        content = last_ai.content if last_ai else ""
+        if isinstance(content, list):
+            content = " ".join(
+                b.get("text", "") if isinstance(b, dict) else str(b)
+                for b in content
+            )
+
         # Detect clarification: the agent's final response asks a question.
         # We intentionally do NOT check whether tools were called during the step —
         # a tool-using agent that couldn't complete its task (e.g. missing job name)
         # will call tools, hit an error, and then ask the user a question.  That
         # final question still signals clarification_needed even though tools ran.
-        if (last_ai is not None
-                and not has_pending_tool_calls
-                and "?" in (last_ai.content if isinstance(last_ai.content, str) else "")):
+        clarification = (
+            last_ai is not None
+            and not has_pending_tool_calls
+            and "?" in content
+        )
+
+        if clarification:
+            logger.info("AGENT", "clarification needed", agent=agent.name, response_preview=content[:150])
             result = {**result, "clarification_needed": True}
+        else:
+            logger.debug("AGENT", "complete", agent=agent.name, response_preview=content[:150])
 
         return result
 

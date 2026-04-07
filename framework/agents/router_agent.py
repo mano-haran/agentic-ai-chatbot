@@ -49,15 +49,20 @@ class RouterAgent(BaseAgent):
         )
         llm = get_llm(model_id=self.model, temperature=0.0, max_tokens=64)
 
-        def router_node(state: AgentState) -> dict[str, Any]:
+        async def router_node(state: AgentState) -> dict[str, Any]:
             last_msg = state["messages"][-1].content if state["messages"] else ""
+            if isinstance(last_msg, list):
+                last_msg = " ".join(
+                    b.get("text", "") if isinstance(b, dict) else str(b)
+                    for b in last_msg
+                )
             prompt = (
                 f"Select the most appropriate agent for the following request.\n\n"
                 f"Available agents:\n{agent_list}\n\n"
                 f"Request: {last_msg}\n\n"
                 f"Reply with ONLY the agent name — nothing else."
             )
-            response = llm.invoke([HumanMessage(content=prompt)])
+            response = await llm.ainvoke([HumanMessage(content=prompt)])
             chosen = response.content.strip()
             if chosen not in agent_map:
                 chosen = default_route

@@ -47,6 +47,7 @@ from dataclasses import dataclass
 from langchain_core.messages import HumanMessage, AIMessage
 
 import config
+from framework.core.log import logger
 from framework.providers.factory import get_llm
 
 
@@ -295,30 +296,41 @@ class IntentRouter:
           matches = 1, long        → LLM confirms; CLARIFY → fallback
           matches ≥ 2              → LLM arbitrates; CLARIFY → ask user to choose
         """
+        logger.debug("ROUTING", "route() called", message=message[:120])
+
         # Short-circuit: meta/capability questions go straight to fallback
         if _META_RE.search(message):
+            logger.debug("ROUTING", "meta/capability question → fallback")
             return self._fallback()
 
         matches = self._scan_patterns(message)
         word_count = len(message.split())
+        logger.debug("ROUTING", "pattern scan", matches=matches, word_count=word_count)
 
         # No pattern match at all → fallback handles it (saves an LLM call)
         if len(matches) == 0:
+            logger.debug("ROUTING", "no pattern matches → fallback")
             return self._fallback()
 
         if len(matches) == 1:
             if word_count <= self._SHORT_MESSAGE_WORDS:
+                logger.debug("ROUTING", "single match, short message → trust regex", workflow=matches[0])
                 return RoutingDecision(workflow=matches[0], clarification=None)
             # LLM confirms the single match for longer messages
             decision = await self._llm_classify(message, hint=matches[0])
+            logger.debug("ROUTING", "LLM confirm", workflow=decision.workflow, clarification=bool(decision.clarification))
             # LLM wasn't confident → let fallback handle it
             if decision.needs_clarification:
+                logger.debug("ROUTING", "LLM not confident → fallback")
                 return self._fallback()
             return decision
 
         # Multiple matches → LLM arbitrates; if still ambiguous, ask the user
         # (don't use fallback here — the user IS asking about a real workflow)
-        return await self._llm_classify(message)
+        logger.debug("ROUTING", "multiple matches → LLM arbitrate", matches=matches)
+        decision = await self._llm_classify(message)
+        logger.debug("ROUTING", "LLM arbitration result", workflow=decision.workflow, clarification=bool(decision.clarification))
+        return decision
 
     # ── Public multi-turn routing ─────────────────────────────────────────────
 
@@ -340,14 +352,20 @@ class IntentRouter:
             current_workflow: Workflow active in this session, or None.
             history:          Prior conversation messages, or empty list.
         """
+        logger.debug("ROUTING", "route_with_context() called",
+             current_workflow=current_workflow, message=message[:120])
+
         # Always re-route fresh from the fallback — it's a catch-all, not a domain,
         # so there's no meaningful "continuation" to detect.
         if (not current_workflow
                 or current_workflow not in self._workflows
                 or current_workflow == self._fallback_workflow_name):
+            logger.debug("ROUTING", "no active workflow → fresh route()")
             return await self.route(message)
 
-        if await self._is_continuation(message, current_workflow, history or []):
+        continuation = await self._is_continuation(message, current_workflow, history or [])
+        logger.debug("ROUTING", "continuation check", result=continuation, workflow=current_workflow)
+        if continuation:
             return RoutingDecision(workflow=current_workflow, clarification=None)
 
         return await self.route(message)

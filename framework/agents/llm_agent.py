@@ -108,12 +108,25 @@ class LLMAgent(BaseAgent):
 
         system_msg = SystemMessage(content=self.role)
 
-        def agent_node(state: AgentState) -> dict[str, Any]:
-            response = llm.invoke([system_msg] + state["messages"])
+        # Async node so we stay on the event loop and avoid thread-executor
+        # issues that can cause silent failures when llm.invoke() is called
+        # from a sync function nested inside ainvoke().
+        async def agent_node(state: AgentState) -> dict[str, Any]:
+            response = await llm.ainvoke([system_msg] + state["messages"])
+            # content may be a list of blocks (e.g. Anthropic tool-use response).
+            # Normalise to a plain string for task_results so downstream code
+            # that expects a string (e.g. logging, clarification detection) works.
+            content = response.content
+            if isinstance(content, list):
+                content = "\n".join(
+                    b.get("text", "") if isinstance(b, dict) else str(b)
+                    for b in content
+                    if not (isinstance(b, dict) and b.get("type") == "tool_use")
+                )
             return {
                 "messages": [response],
                 "next_agent": self.name,
-                "task_results": {self.name: response.content},
+                "task_results": {self.name: content},
             }
 
         def should_continue(state: AgentState) -> str:

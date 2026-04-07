@@ -43,9 +43,36 @@ from pathlib import Path
 from langchain_core.messages import AIMessage, HumanMessage
 
 from framework.agents.llm_agent import LLMAgent
+from framework.core.log import logger
 from framework.loader.yaml_loader import YAMLLoader
 from framework.workflow.intent_router import IntentRouter, RoutingDecision
 from framework.workflow.workflow import Workflow, extract_history, compact_history
+
+
+def _extract_content(content) -> str:
+    """
+    Safely convert an AIMessage.content to a plain string.
+
+    Some providers (notably Anthropic with tool-calling) return content as a
+    list of typed blocks rather than a plain string, e.g.:
+        [{"type": "text", "text": "Here is the analysis…"},
+         {"type": "tool_use", "id": "…", …}]
+
+    Passing such a list directly to cl.Message(content=…) produces an empty
+    or broken response.  This function extracts only the text blocks and joins
+    them so the user always sees readable output.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                parts.append(block.get("text", ""))
+            elif isinstance(block, str):
+                parts.append(block)
+        return "\n".join(p for p in parts if p)
+    return str(content)
 
 # ── Load workflows ─────────────────────────────────────────────────────────────
 
@@ -117,9 +144,13 @@ _router = IntentRouter(
 
 @cl.on_chat_start
 async def on_chat_start() -> None:
+    session_id = cl.context.session.id
     cl.user_session.set("current_workflow", None)
     cl.user_session.set("history", [])
     cl.user_session.set("awaiting_clarification", False)
+
+    logger.info("SESSION", "chat started", session_id=session_id,
+                loaded_workflows=list(_workflows.keys()))
 
     lines = [f"- **{w.display_name}**: {w.description}" for w in _workflows.values() if w.name != _FALLBACK_NAME]
     capabilities = "\n".join(lines) if lines else "_No workflows loaded._"
@@ -138,6 +169,13 @@ async def on_message(message: cl.Message) -> None:
     history = cl.user_session.get("history", [])
     current_workflow: str | None = cl.user_session.get("current_workflow")
     awaiting_clarification: bool = cl.user_session.get("awaiting_clarification", False)
+
+    logger.debug("SESSION", "message received",
+                 session_id=cl.context.session.id,
+                 current_workflow=current_workflow,
+                 awaiting_clarification=awaiting_clarification,
+                 history_len=len(history),
+                 message=message.content[:120])
 
     # ── 2. Route ─────────────────────────────────────────────────────────────────
     #
@@ -176,6 +214,11 @@ async def on_message(message: cl.Message) -> None:
             current_workflow=current_workflow,
             history=history,
         )
+
+    logger.info("ROUTING", "decision",
+                workflow=decision.workflow,
+                needs_clarification=decision.needs_clarification,
+                clarification_preview=decision.clarification[:80] if decision.clarification else None)
 
     # ── 3. Handle clarification request ──────────────────────────────────────────
     #
@@ -218,6 +261,7 @@ async def on_message(message: cl.Message) -> None:
         ).send()
 
     cl.user_session.set("current_workflow", workflow_name)
+    logger.info("WORKFLOW", "selected", workflow=workflow_name, switched=switched)
 
     # ── 6. Run workflow with progress tracking ───────────────────────────────────
     step_names = workflow.steps()
@@ -262,35 +306,56 @@ async def on_message(message: cl.Message) -> None:
     run_thread_id = f"{cl.context.session.id}-{uuid.uuid4().hex}"
 
     result: dict = {}
-    async for completed_name, state in workflow.stream_steps(
-        message.content,
-        thread_id=run_thread_id,
-        history=history,
-    ):
-        if completed_name is None:
-            # Final yield — workflow fully complete
-            result = state
-            break
+    logger.info("WORKFLOW", "stream_steps start", workflow=workflow_name,
+                steps=step_names, thread_id=run_thread_id)
+    try:
+        async for completed_name, state in workflow.stream_steps(
+            message.content,
+            thread_id=run_thread_id,
+            history=history,
+        ):
+            if completed_name is None:
+                # Final yield — workflow fully complete
+                result = state
+                logger.info("WORKFLOW", "stream_steps complete", workflow=workflow_name)
+                break
 
-        # Mark the completed step as done
-        if completed_name in tasks:
-            tasks[completed_name].status = TaskStatus.DONE
-            await task_list.update()
+            logger.info("WORKFLOW", "step complete", step=completed_name,
+                        clarification_needed=state.get("clarification_needed"),
+                        error=state.get("error"))
 
-        # If stopped early, mark remaining steps as failed
-        if state.get("clarification_needed") or state.get("error"):
-            for name in step_names:
-                if tasks[name].status in (TaskStatus.READY, TaskStatus.RUNNING):
-                    tasks[name].status = TaskStatus.FAILED
-            await task_list.update()
-            result = state
-            break
+            # Mark the completed step as done
+            if completed_name in tasks:
+                tasks[completed_name].status = TaskStatus.DONE
+                await task_list.update()
 
-        # Mark the next step as running
-        idx = step_names.index(completed_name) if completed_name in step_names else -1
-        if 0 <= idx < len(step_names) - 1:
-            tasks[step_names[idx + 1]].status = TaskStatus.RUNNING
-            await task_list.update()
+            # If stopped early, mark remaining steps as failed
+            if state.get("clarification_needed") or state.get("error"):
+                for name in step_names:
+                    if tasks[name].status in (TaskStatus.READY, TaskStatus.RUNNING):
+                        tasks[name].status = TaskStatus.FAILED
+                await task_list.update()
+                result = state
+                break
+
+            # Mark the next step as running
+            idx = step_names.index(completed_name) if completed_name in step_names else -1
+            if 0 <= idx < len(step_names) - 1:
+                tasks[step_names[idx + 1]].status = TaskStatus.RUNNING
+                await task_list.update()
+
+    except Exception as exc:
+        logger.error("WORKFLOW", f"stream_steps raised for workflow '{workflow_name}'",
+                     exc=exc, workflow=workflow_name)
+        # Mark all in-progress tasks as failed so the UI shows a clean terminal state
+        for task in tasks.values():
+            if task.status in (TaskStatus.READY, TaskStatus.RUNNING):
+                task.status = TaskStatus.FAILED
+        await task_list.update()
+        await cl.Message(
+            content=f"An error occurred while running **{workflow.display_name}**:\n```\n{exc}\n```"
+        ).send()
+        return
 
     # ── Finalise task list ───────────────────────────────────────────────────────
     # After the stream_steps loop, some tasks may still show RUNNING or READY.
@@ -312,7 +377,11 @@ async def on_message(message: cl.Message) -> None:
 
     # ── 7. Surface the final response ────────────────────────────────────────────
     ai_messages = [m for m in result.get("messages", []) if isinstance(m, AIMessage)]
-    final = ai_messages[-1].content if ai_messages else "Workflow completed with no output."
+    # _extract_content() normalises content to str — some providers (e.g. Anthropic
+    # with tool-calling) return a list of typed blocks instead of a plain string.
+    final = _extract_content(ai_messages[-1].content) if ai_messages else "Workflow completed with no output."
+    logger.debug("RESPONSE", "sending final response",
+                 workflow=workflow_name, content_preview=final[:150])
     await cl.Message(content=final).send()
 
     # ── 8. If a step asked for clarification, pause here ─────────────────────────
