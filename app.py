@@ -320,25 +320,29 @@ async def on_message(message: cl.Message) -> None:
                 logger.info("WORKFLOW", "stream_steps complete", workflow=workflow_name)
                 break
 
+            stopped_early = bool(state.get("clarification_needed") or state.get("error"))
             logger.info("WORKFLOW", "step complete", step=completed_name,
+                        stopped_early=stopped_early,
                         clarification_needed=state.get("clarification_needed"),
                         error=state.get("error"))
 
-            # Mark the completed step as done
+            # Mark the completed step FAILED if it stopped the pipeline, DONE otherwise.
+            # Remaining steps that never ran stay READY ("not started") — they are NOT
+            # marked FAILED because they were never attempted.
             if completed_name in tasks:
-                tasks[completed_name].status = TaskStatus.DONE
+                tasks[completed_name].status = (
+                    TaskStatus.FAILED if stopped_early else TaskStatus.DONE
+                )
                 await task_list.update()
 
-            # If stopped early, mark remaining steps as failed
-            if state.get("clarification_needed") or state.get("error"):
-                for name in step_names:
-                    if tasks[name].status in (TaskStatus.READY, TaskStatus.RUNNING):
-                        tasks[name].status = TaskStatus.FAILED
-                await task_list.update()
+            if stopped_early:
+                # Pipeline halted — leave unstarted steps in READY state so the
+                # sidebar shows them as "not started" rather than failed.
                 result = state
                 break
 
-            # Mark the next step as running
+            # Only advance the progress indicator to the next step when the
+            # current step completed successfully (checked above).
             idx = step_names.index(completed_name) if completed_name in step_names else -1
             if 0 <= idx < len(step_names) - 1:
                 tasks[step_names[idx + 1]].status = TaskStatus.RUNNING
@@ -358,20 +362,17 @@ async def on_message(message: cl.Message) -> None:
         return
 
     # ── Finalise task list ───────────────────────────────────────────────────────
-    # After the stream_steps loop, some tasks may still show RUNNING or READY.
-    # This happens in two situations:
-    #   1. Single-step workflow: the step is marked RUNNING before the loop starts
-    #      (line above), but if stream_steps exits via the "completed_name is None"
-    #      branch (normal completion) without ever yielding the step name, the task
-    #      never transitions to DONE.
-    #   2. Multi-step workflow with an early break (clarification / error): the break
-    #      already marks unstarted steps FAILED, but the CURRENTLY-RUNNING step
-    #      may not have been captured as a task_results key yet.
-    # Marking any residual RUNNING/READY tasks as DONE here ensures the sidebar
-    # always shows a clean terminal state rather than a spinner that never resolves.
-    # Tasks already marked FAILED (early stop) are intentionally left unchanged.
+    # Only flip RUNNING → DONE.  This handles the single-step workflow case where
+    # the step is marked RUNNING before the loop but stream_steps exits via the
+    # "completed_name is None" path without ever yielding the step name.
+    #
+    # READY tasks are intentionally left as READY — they represent steps that
+    # were never attempted (pipeline stopped early).  Stamping them DONE would
+    # falsely imply they ran successfully.
+    #
+    # FAILED tasks are left unchanged (a failed step stays failed).
     for task in tasks.values():
-        if task.status in (TaskStatus.READY, TaskStatus.RUNNING):
+        if task.status == TaskStatus.RUNNING:
             task.status = TaskStatus.DONE
     await task_list.update()
 
