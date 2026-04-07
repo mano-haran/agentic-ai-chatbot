@@ -5,6 +5,33 @@ from langgraph.graph import StateGraph
 
 from framework.core.log import logger
 
+# Phrases that indicate the agent is requesting more input from the user.
+# Used as a fallback when the response doesn't contain a literal "?".
+# LLMs sometimes phrase clarification requests as statements ("Please provide …")
+# rather than questions, so checking only for "?" is too fragile.
+_CLARIFICATION_PHRASES = (
+    "please provide",
+    "could you provide",
+    "can you provide",
+    "please share",
+    "please give me",
+    "i need a jenkins",
+    "i need the jenkins",
+    "i'll need",
+    "i will need",
+    "no jenkins url",
+    "no url",
+    "missing url",
+)
+
+
+def _needs_clarification(content: str) -> bool:
+    """Return True if the content signals the agent needs more user input."""
+    if "?" in content:
+        return True
+    lower = content.lower()
+    return any(phrase in lower for phrase in _CLARIFICATION_PHRASES)
+
 
 def make_agent_node(agent: "BaseAgent"):
     """
@@ -61,15 +88,19 @@ def make_agent_node(agent: "BaseAgent"):
                 for b in content
             )
 
-        # Detect clarification: the agent's final response asks a question.
+        # Detect clarification: the agent's final response asks for more input.
+        # We check for "?" AND common "please provide" style phrases because LLMs
+        # sometimes phrase clarification requests as statements rather than questions,
+        # which means a "?" check alone misses them and the pipeline continues
+        # incorrectly.
         # We intentionally do NOT check whether tools were called during the step —
-        # a tool-using agent that couldn't complete its task (e.g. missing job name)
+        # a tool-using agent that couldn't complete its task (e.g. missing URL)
         # will call tools, hit an error, and then ask the user a question.  That
-        # final question still signals clarification_needed even though tools ran.
+        # final request still signals clarification_needed even though tools ran.
         clarification = (
             last_ai is not None
             and not has_pending_tool_calls
-            and "?" in content
+            and _needs_clarification(content)
         )
 
         if clarification:

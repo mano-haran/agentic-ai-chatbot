@@ -54,8 +54,10 @@ agents:
         2. Call get_build_info(build_url) for metadata.
 
       If no Jenkins URL is present and no prior data exists in the history, ask:
-        "Please provide the full Jenkins job or build URL
-         (e.g. https://jenkins.acme.com/job/MyApp/ or .../job/MyApp/142/)"
+        "Please provide the full Jenkins job or build URL —
+         for example https://jenkins.acme.com/job/MyApp/ (job) or
+         https://jenkins.acme.com/job/MyApp/142/ (specific build).
+         Which URL should I fetch logs from?"
 
       Do NOT guess or construct a URL.
       Do NOT diagnose or suggest fixes — that is handled by the next agents.
