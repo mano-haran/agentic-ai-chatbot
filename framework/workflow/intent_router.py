@@ -376,7 +376,37 @@ class IntentRouter:
         if continuation:
             return RoutingDecision(workflow=current_workflow, clarification=None)
 
-        return await self.route(message)
+        decision = await self.route(message)
+
+        # Sticky-workflow rule: once the user is in a specific workflow, only
+        # switch if routing clearly identifies a DIFFERENT specific workflow.
+        #
+        # Do NOT switch when:
+        #   • route() returns the fallback (general assistant) — the message
+        #     didn't match any workflow's keywords, which often happens for
+        #     domain-specific queries that simply lack the right trigger words.
+        #   • route() asks for clarification — the message is ambiguous, so
+        #     there is no confident reason to leave the current workflow.
+        #
+        # DO switch when route() returns a different non-fallback workflow,
+        # meaning the message clearly belongs to another specific capability
+        # (e.g. user is in KB Search and asks to analyse a Jenkins build log).
+        if current_workflow and current_workflow != self._fallback_workflow_name:
+            target = decision.workflow
+            is_clear_switch = (
+                not decision.needs_clarification
+                and target is not None
+                and target != self._fallback_workflow_name
+                and target != current_workflow
+            )
+            if not is_clear_switch:
+                logger.debug("ROUTING", "sticky workflow — staying in current",
+                             current=current_workflow,
+                             route_decided=target,
+                             needs_clarification=decision.needs_clarification)
+                return RoutingDecision(workflow=current_workflow, clarification=None)
+
+        return decision
 
     # ── Continuation detection ────────────────────────────────────────────────
 
