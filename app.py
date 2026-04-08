@@ -223,6 +223,12 @@ async def on_start_workflow(action: cl.Action) -> None:
     ])
 
     logger.info("SESSION", "quick-start button clicked", workflow=workflow_name)
+
+    # Reset task list panel so the previous run's step states don't persist
+    clear_tl = TaskList()
+    clear_tl.status = f"Ready — {workflow.display_name}"
+    await clear_tl.send()
+
     await cl.Message(content=prompt, author="assistant").send()
 
 
@@ -292,6 +298,14 @@ async def on_message(message: cl.Message) -> None:
             AIMessage(content=prompt),
         ])
         logger.info("ROUTING", "explicit workflow switch", target=switch_target)
+
+        # Clear the previous workflow's task list by sending a fresh empty one.
+        # Chainlit replaces the task list panel with the latest TaskList.send()
+        # call in the session, so an empty list effectively resets the sidebar.
+        clear_tl = TaskList()
+        clear_tl.status = f"Ready — {target_wf.display_name}"
+        await clear_tl.send()
+
         await cl.Message(
             content=f"*Switching to **{target_wf.display_name}***\n\n{prompt}",
             author="assistant",
