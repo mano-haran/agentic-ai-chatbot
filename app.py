@@ -260,8 +260,11 @@ async def _execute_workflow(
                         await task_list.update()
 
                     if stopped_early:
-                        result = partial
-                        break
+                        # Don't break here — partial only has scalar flags, not messages.
+                        # Let the loop continue to the "done" event which reads the full
+                        # state (including messages) from the checkpointer.  The graph
+                        # has already stopped at END so no further step events arrive.
+                        continue
 
                     idx = step_names.index(step_name) if step_name in step_names else -1
                     if 0 <= idx < len(step_names) - 1:
