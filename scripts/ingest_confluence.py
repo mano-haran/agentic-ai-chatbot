@@ -175,7 +175,8 @@ def _page_to_chunks(page: dict) -> list[dict]:
     title = page.get("title", "Untitled")
     base_url = config.CONFLUENCE_URL.rstrip("/")
     page_id = page.get("id", "")
-    url = f"{base_url}/pages/{page_id}" if page_id else base_url
+    # Data Center URL format — /pages/viewpage.action?pageId=<id>
+    url = f"{base_url}/pages/viewpage.action?pageId={page_id}" if page_id else base_url
     html = page.get("body", {}).get("storage", {}).get("value", "")
     if html:
         return _html_to_sections(html, title, url)

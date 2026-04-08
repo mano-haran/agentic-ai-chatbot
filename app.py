@@ -333,7 +333,7 @@ async def on_chat_start() -> None:
         "jenkins_log_analysis": (
             "Share a **Job URL**, a **Build URL**, or **paste error text** directly."
         ),
-        "confluence_qa": (
+        "devops_kb_search": (
             "Ask any question about your DevOps processes or onboarding procedures."
         ),
     }
