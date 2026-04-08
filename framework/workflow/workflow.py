@@ -240,7 +240,11 @@ class Workflow:
         self.action_prompt = action_prompt   # follow-up shown when the quick-start button is clicked
         self.aliases: list[str] = [a.lower() for a in (aliases or [])]
         self._checkpointer = get_checkpointer()
-        self._compiled = self.entry_agent.compile(checkpointer=self._checkpointer)
+        # Compiled graph is built lazily on first use so startup only pays the
+        # cost of parsing YAML and constructing agent config objects.
+        # LangGraph's StateGraph.compile() is expensive (graph validation, runnable
+        # wiring, checkpointer setup) — deferring it keeps app startup fast.
+        self._compiled = None
 
     def steps(self) -> list[str]:
         """
@@ -262,6 +266,24 @@ class Workflow:
             return {a.name: a.display_name for a in self.entry_agent.sub_agents}
         return {self.entry_agent.name: self.entry_agent.display_name}
 
+    def _get_compiled(self):
+        """
+        Return the compiled LangGraph, building it on first call.
+
+        Compilation is deferred from __init__ so the app starts immediately
+        after loading YAML — the first user message that hits a workflow pays
+        the one-time compilation cost instead of every process start.
+        """
+        if self._compiled is None:
+            import time
+            t0 = time.perf_counter()
+            self._compiled = self.entry_agent.compile(checkpointer=self._checkpointer)
+            print(
+                f"[workflow] compiled '{self.name}' in {time.perf_counter() - t0:.2f}s",
+                flush=True,
+            )
+        return self._compiled
+
     def _config(self, thread_id: str) -> dict:
         return {"configurable": {"thread_id": thread_id}}
 
@@ -273,7 +295,7 @@ class Workflow:
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Run the workflow to completion and return the final AgentState."""
-        return await self._compiled.ainvoke(
+        return await self._get_compiled().ainvoke(
             _build_initial_state(user_message, history, metadata),
             config=self._config(thread_id),
         )
@@ -289,7 +311,7 @@ class Workflow:
         Yield LangGraph astream_events (v2) for the full workflow execution.
         Filter by event["event"] == "on_chat_model_stream" to get tokens.
         """
-        async for event in self._compiled.astream_events(
+        async for event in self._get_compiled().astream_events(
             _build_initial_state(user_message, history, metadata),
             config=self._config(thread_id),
             version="v2",
@@ -343,7 +365,7 @@ class Workflow:
         pending_step: str | None = None
         final_state: dict[str, Any] = {}
 
-        async for mode, data in self._compiled.astream(
+        async for mode, data in self._get_compiled().astream(
             initial, config=config, stream_mode=["updates", "values"]
         ):
             if mode == "updates":
@@ -415,7 +437,7 @@ class Workflow:
         # reducer that only LangGraph applies correctly.
         partial: dict[str, Any] = {}
 
-        async for event in self._compiled.astream_events(
+        async for event in self._get_compiled().astream_events(
             initial, config=run_config, version="v2"
         ):
             evt = event["event"]

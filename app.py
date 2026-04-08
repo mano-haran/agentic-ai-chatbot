@@ -78,16 +78,21 @@ def _extract_content(content) -> str:
 
 # ── Load workflows ─────────────────────────────────────────────────────────────
 
+import time as _time
+
 _loader = YAMLLoader()
 _workflows: dict[str, Workflow] = {}
 
+_t_startup = _time.perf_counter()
 for _yaml in Path("workflows").rglob("workflow.yaml"):
     try:
+        _t0 = _time.perf_counter()
         _wf = _loader.load(_yaml)
         _workflows[_wf.name] = _wf
-        print(f"[startup] loaded workflow: {_wf.name}")
+        print(f"[startup] loaded '{_wf.name}' in {_time.perf_counter() - _t0:.2f}s", flush=True)
     except Exception as exc:
-        print(f"[startup] WARN: failed to load {_yaml}: {exc}")
+        print(f"[startup] WARN: failed to load {_yaml}: {exc}", flush=True)
+print(f"[startup] all workflows loaded in {_time.perf_counter() - _t_startup:.2f}s", flush=True)
 
 _FALLBACK_NAME = "general_assistant"
 
