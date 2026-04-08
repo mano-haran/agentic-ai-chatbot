@@ -76,7 +76,9 @@ CHROMA_COLLECTION: str = os.getenv("CHROMA_COLLECTION", "confluence")
 
 # Embedding provider: "local" (sentence-transformers, no API key needed) or "openai"
 EMBEDDING_PROVIDER: str = os.getenv("EMBEDDING_PROVIDER", "local")
-EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL", "")   # provider-specific default applied in embeddings.py
+EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL", "")        # provider-specific default applied in embeddings.py
+EMBEDDING_BASE_URL: str = os.getenv("EMBEDDING_BASE_URL", "")  # custom API endpoint for OpenAI-compatible providers
+EMBEDDING_API_KEY: str = os.getenv("EMBEDDING_API_KEY", "")    # API key if different from OPENAI_API_KEY
 
 
 # ── LLM config (llm_config.yaml) ──────────────────────────────────────────────

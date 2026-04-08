@@ -39,11 +39,22 @@ def get_embeddings() -> Embeddings:
     if provider == "openai":
         from langchain_openai import OpenAIEmbeddings
         # Default to text-embedding-3-small when EMBEDDING_MODEL is not set.
-        # Previously config.EMBEDDING_MODEL defaulted to "all-MiniLM-L6-v2" (the local
-        # model name), which is not a valid OpenAI model and caused API errors.
         openai_model = model or "text-embedding-3-small"
-        print(f"[embeddings] openai provider, model={openai_model}", flush=True)
-        return OpenAIEmbeddings(model=openai_model)
+        # Build kwargs explicitly so custom endpoints (e.g. an OpenAI-compatible
+        # gateway serving bge-m3 or similar) are always used.  Relying on
+        # OPENAI_API_BASE / OPENAI_BASE_URL env vars is fragile — the LLM and
+        # embedding provider may use different keys / endpoints.
+        kwargs: dict = {"model": openai_model}
+        if config.EMBEDDING_BASE_URL:
+            kwargs["base_url"] = config.EMBEDDING_BASE_URL
+        if config.EMBEDDING_API_KEY:
+            kwargs["api_key"] = config.EMBEDDING_API_KEY
+        print(
+            f"[embeddings] openai provider, model={openai_model}"
+            + (f", base_url={config.EMBEDDING_BASE_URL}" if config.EMBEDDING_BASE_URL else ""),
+            flush=True,
+        )
+        return OpenAIEmbeddings(**kwargs)
 
     if provider == "local":
         model_name = model or "all-MiniLM-L6-v2"
