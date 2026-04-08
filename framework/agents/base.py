@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 from typing import Any, AsyncIterator
 from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.runnables import RunnableConfig
 from langgraph.graph import StateGraph
 
 from framework.core.log import logger
@@ -60,13 +61,24 @@ def make_agent_node(agent: "BaseAgent"):
     The corrected check ignores whether tools were called during the step and
     focuses only on the nature of the terminal response: if the agent's last word
     is a question, it needs more input before the workflow can continue.
+
+    Config forwarding
+    -----------------
+    The node accepts a RunnableConfig second argument which LangGraph injects
+    automatically.  Forwarding it to the inner ainvoke() propagates the callback
+    context (set up by astream_events on the outer graph) into each agent's
+    internal graph, making tool-call events visible to the outer event stream.
+    Without this, tool events from inside agent graphs would be invisible to
+    Workflow.stream_with_events() and the AGENT_STEPS feature would not work.
     """
-    async def node(state: dict[str, Any]) -> dict[str, Any]:
+    async def node(state: dict[str, Any], config: RunnableConfig) -> dict[str, Any]:
         msgs_before = len(state.get("messages", []))
         logger.debug("AGENT", "start", agent=agent.name, msg_count=msgs_before)
 
         try:
-            result = await agent.compile().ainvoke(state)
+            # Forward the LangGraph config so callbacks (including those registered
+            # by astream_events) propagate into the agent's internal graph.
+            result = await agent.compile().ainvoke(state, config=config)
         except Exception as exc:
             logger.error("AGENT", f"agent '{agent.name}' raised during ainvoke", exc=exc)
             raise

@@ -1,7 +1,8 @@
-from typing import Any, AsyncGenerator, AsyncIterator
+from typing import Any, AsyncGenerator, AsyncIterator, Literal
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, BaseMessage
 
 import config
+from framework.core.log import logger
 from framework.agents.base import BaseAgent
 from framework.agents.workflow_agents import SequentialAgent
 from framework.core.checkpointer import get_checkpointer
@@ -361,3 +362,91 @@ class Workflow:
                     pending_step = None
 
         yield None, final_state
+
+    async def stream_with_events(
+        self,
+        user_message: str,
+        thread_id: str,
+        history: list[BaseMessage] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> AsyncGenerator[tuple, None]:
+        """
+        Stream workflow execution yielding typed event tuples for both
+        workflow-level step tracking AND within-step tool calls.
+
+        Used when AGENT_STEPS != "off" so the UI can show collapsible cl.Step
+        blocks for each tool invocation alongside the TaskList step indicators.
+
+        Yields
+        ------
+        ("step_start", step_name)              a pipeline stage began
+        ("step_done",  step_name, partial)     a stage finished; partial contains
+                                               clarification_needed and error flags
+        ("tool_start", tool_name, tool_input)  a tool was invoked; input is a dict
+        ("tool_end",   tool_name, tool_output) a tool returned; output is a string
+        ("done",       None,      final_state) whole workflow complete; final_state
+                                               contains the full messages list
+
+        How tool events are captured
+        ----------------------------
+        LangGraph's astream_events(version="v2") propagates events through the
+        callback system.  make_agent_node() forwards the outer RunnableConfig
+        (which carries those callbacks) into each agent's inner ainvoke() call.
+        This makes on_tool_start / on_tool_end events from inside agent graphs
+        visible to this outer stream — without that forwarding, tool events would
+        be silently swallowed.
+
+        Final state
+        -----------
+        Per-node outputs (from on_chain_end) are partial dicts — they contain only
+        the keys the node updated, and messages use the add_messages reducer so we
+        cannot reconstruct the full list by merging partials.  Instead, after the
+        event stream ends we read the authoritative final state directly from the
+        LangGraph checkpointer, which holds the fully-reduced state.
+        """
+        initial = _build_initial_state(user_message, history, metadata)
+        run_config = self._config(thread_id)
+        expected_steps = set(self.steps())
+
+        # Accumulate scalar sentinel fields from per-node outputs.
+        # We only track these (not messages) since messages need the add_messages
+        # reducer that only LangGraph applies correctly.
+        partial: dict[str, Any] = {}
+
+        async for event in self._compiled.astream_events(
+            initial, config=run_config, version="v2"
+        ):
+            evt = event["event"]
+            name = event.get("name", "")
+            data = event.get("data", {})
+
+            if evt == "on_chain_start" and name in expected_steps:
+                yield ("step_start", name)
+
+            elif evt == "on_chain_end" and name in expected_steps:
+                output = data.get("output", {})
+                if isinstance(output, dict):
+                    for key in ("clarification_needed", "error", "next_agent"):
+                        if key in output:
+                            partial[key] = output[key]
+                yield ("step_done", name, dict(partial))
+
+            elif evt == "on_tool_start":
+                yield ("tool_start", name, data.get("input", {}))
+
+            elif evt == "on_tool_end":
+                yield ("tool_end", name, data.get("output", ""))
+
+        # Read the authoritative final state from the checkpointer so we have the
+        # complete messages list (including all add_messages reductions).
+        try:
+            cp = await self._checkpointer.aget_tuple(run_config)
+            final_state: dict[str, Any] = (
+                cp.checkpoint.get("channel_values", partial) if cp else partial
+            )
+        except Exception as exc:
+            logger.warning("WORKFLOW", "could not read final state from checkpointer",
+                           exc=str(exc))
+            final_state = partial
+
+        yield ("done", None, final_state)

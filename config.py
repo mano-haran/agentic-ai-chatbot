@@ -51,6 +51,16 @@ HISTORY_SUMMARY_MODEL: str = os.getenv("HISTORY_SUMMARY_MODEL", DEFAULT_ROUTING_
 LOG_LEVEL: str = os.getenv("LOG_LEVEL", "OFF").upper()
 LOG_FILE: str = os.getenv("LOG_FILE", "app.log")
 
+# ── Inline agent step visibility ───────────────────────────────────────────────
+# Controls whether tool calls are surfaced as collapsible cl.Step blocks in the
+# Chainlit chat window (in addition to the high-level TaskList sidebar).
+#
+#   off     — TaskList only; no inline steps shown (default, cleanest for end users)
+#   tools   — show a collapsible step for each tool call (name only, no I/O detail)
+#             good for users who want to see what's happening without being overwhelmed
+#   verbose — show tool name + truncated input/output; use when debugging workflows
+AGENT_STEPS: str = os.getenv("AGENT_STEPS", "off").lower()
+
 # ── Tool integrations ──────────────────────────────────────────────────────────
 JENKINS_URL: str = os.getenv("JENKINS_URL", "http://localhost:8080")
 JENKINS_USER: str = os.getenv("JENKINS_USER", "")

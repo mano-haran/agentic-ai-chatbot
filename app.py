@@ -43,6 +43,7 @@ from chainlit import Task, TaskList, TaskStatus
 from pathlib import Path
 from langchain_core.messages import AIMessage, HumanMessage
 
+import config as _cfg
 from framework.agents.llm_agent import LLMAgent
 from framework.core.log import logger
 from framework.loader.yaml_loader import YAMLLoader
@@ -139,6 +140,180 @@ _router = IntentRouter(
     list(_workflows.values()),
     fallback_workflow_name=_FALLBACK_NAME,
 )
+
+# ── Workflow execution helper ──────────────────────────────────────────────────
+
+async def _execute_workflow(
+    workflow: Workflow,
+    user_message: str,
+    run_thread_id: str,
+    history: list,
+) -> dict | None:
+    """
+    Run a workflow and manage all Chainlit UI updates (TaskList + optional cl.Steps).
+
+    Returns the final state dict on success, or None if an error occurred
+    (the error message has already been sent to the chat in that case).
+
+    Two streaming modes controlled by AGENT_STEPS in .env / config:
+
+      off     — stream_steps(): TaskList progress only.  Efficient, no extra UI
+                noise.  Default for production or end-user deployments.
+
+      tools   — stream_with_events(): TaskList + a collapsible cl.Step per tool
+                call showing the tool name only.  Lets users see what tools ran
+                without exposing raw input/output.
+
+      verbose — same as 'tools' but each Step also shows truncated input/output.
+                Use when debugging a workflow or investigating unexpected results.
+    """
+    step_names = workflow.steps()
+    display_names = workflow.agent_display_names()
+    mode = _cfg.AGENT_STEPS   # "off" | "tools" | "verbose"
+
+    # ── Build TaskList ──────────────────────────────────────────────────────────
+    # A fresh TaskList is created each run so the sidebar shows a clean slate
+    # (no stale DONE/FAILED icons from the previous turn).
+    task_list = TaskList()
+    task_list.status = workflow.display_name
+    tasks: dict[str, Task] = {}
+    for name in step_names:
+        task = Task(title=display_names.get(name, name), status=TaskStatus.READY)
+        tasks[name] = task
+        await task_list.add_task(task)
+    await task_list.send()
+
+    if step_names:
+        tasks[step_names[0]].status = TaskStatus.RUNNING
+        await task_list.update()
+
+    result: dict = {}
+
+    try:
+        if mode == "off":
+            # ── Mode: TaskList only ─────────────────────────────────────────────
+            async for completed_name, state in workflow.stream_steps(
+                user_message, thread_id=run_thread_id, history=history
+            ):
+                if completed_name is None:
+                    result = state
+                    logger.info("WORKFLOW", "stream_steps complete", workflow=workflow.name)
+                    break
+
+                stopped_early = bool(state.get("clarification_needed") or state.get("error"))
+                logger.info("WORKFLOW", "step complete", step=completed_name,
+                            stopped_early=stopped_early,
+                            clarification_needed=state.get("clarification_needed"),
+                            error=state.get("error"))
+
+                if completed_name in tasks:
+                    tasks[completed_name].status = (
+                        TaskStatus.FAILED if stopped_early else TaskStatus.DONE
+                    )
+                    await task_list.update()
+
+                if stopped_early:
+                    result = state
+                    break
+
+                idx = step_names.index(completed_name) if completed_name in step_names else -1
+                if 0 <= idx < len(step_names) - 1:
+                    tasks[step_names[idx + 1]].status = TaskStatus.RUNNING
+                    await task_list.update()
+
+        else:
+            # ── Mode: TaskList + inline cl.Step per tool call ───────────────────
+            #
+            # stream_with_events() yields typed tuples from astream_events().
+            # Tool events propagate because make_agent_node forwards the outer
+            # LangGraph config (with its callbacks) into each agent's ainvoke().
+            #
+            # open_tool_steps holds in-flight cl.Step objects keyed by tool name
+            # so we can update them when the matching on_tool_end event arrives.
+            open_tool_steps: dict[str, cl.Step] = {}
+
+            async for event in workflow.stream_with_events(
+                user_message, thread_id=run_thread_id, history=history
+            ):
+                kind = event[0]
+
+                if kind == "step_start":
+                    _, step_name = event
+                    if step_name in tasks:
+                        tasks[step_name].status = TaskStatus.RUNNING
+                        await task_list.update()
+
+                elif kind == "step_done":
+                    _, step_name, partial = event
+                    stopped_early = bool(partial.get("clarification_needed") or partial.get("error"))
+                    logger.info("WORKFLOW", "step complete", step=step_name,
+                                stopped_early=stopped_early)
+                    if step_name in tasks:
+                        tasks[step_name].status = (
+                            TaskStatus.FAILED if stopped_early else TaskStatus.DONE
+                        )
+                        await task_list.update()
+
+                    if stopped_early:
+                        result = partial
+                        break
+
+                    idx = step_names.index(step_name) if step_name in step_names else -1
+                    if 0 <= idx < len(step_names) - 1:
+                        tasks[step_names[idx + 1]].status = TaskStatus.RUNNING
+                        await task_list.update()
+
+                elif kind == "tool_start":
+                    _, tool_name, tool_input = event
+                    # Create a collapsed step block inline in the chat.
+                    # "tools" mode: name only — no input shown.
+                    # "verbose" mode: input shown (truncated to 500 chars).
+                    step = cl.Step(name=f"🔧 {tool_name}", type="tool")
+                    if mode == "verbose" and tool_input:
+                        step.input = str(tool_input)[:500]
+                    await step.send()
+                    open_tool_steps[tool_name] = step
+                    logger.debug("WORKFLOW", "tool_start", tool=tool_name)
+
+                elif kind == "tool_end":
+                    _, tool_name, tool_output = event
+                    step = open_tool_steps.pop(tool_name, None)
+                    if step:
+                        if mode == "verbose" and tool_output:
+                            step.output = str(tool_output)[:500]
+                        await step.update()
+                    logger.debug("WORKFLOW", "tool_end", tool=tool_name)
+
+                elif kind == "done":
+                    _, _, final_state = event
+                    result = final_state
+                    logger.info("WORKFLOW", "stream_with_events complete", workflow=workflow.name)
+                    break
+
+            # Close any steps left open due to an early exit
+            for step in open_tool_steps.values():
+                await step.update()
+
+    except Exception as exc:
+        logger.error("WORKFLOW", "execution error", workflow=workflow.name, exc=exc)
+        for task in tasks.values():
+            if task.status in (TaskStatus.READY, TaskStatus.RUNNING):
+                task.status = TaskStatus.FAILED
+        await task_list.update()
+        await cl.Message(
+            content=f"An error occurred while running **{workflow.display_name}**:\n```\n{exc}\n```"
+        ).send()
+        return None   # signals caller to skip response surfacing
+
+    # Only flip RUNNING → DONE.  READY tasks were never attempted (pipeline stopped
+    # early) and should stay READY, not be falsely stamped as completed.
+    for task in tasks.values():
+        if task.status == TaskStatus.RUNNING:
+            task.status = TaskStatus.DONE
+    await task_list.update()
+
+    return result
+
 
 # ── Chainlit handlers ──────────────────────────────────────────────────────────
 
@@ -412,118 +587,22 @@ async def on_message(message: cl.Message) -> None:
     cl.user_session.set("current_workflow", workflow_name)
     logger.info("WORKFLOW", "selected", workflow=workflow_name, switched=switched)
 
-    # ── 6. Run workflow with progress tracking ───────────────────────────────────
-    step_names = workflow.steps()
-
-    # Build TaskList with all steps in READY state up front.
-    # A new TaskList object is created every turn so the sidebar shows a clean
-    # slate for the current run (not the icon states from a prior run).
-    display_names = workflow.agent_display_names()
-    task_list = TaskList()
-    task_list.status = workflow.display_name
-    tasks: dict[str, Task] = {}
-    for name in step_names:
-        task = Task(title=display_names.get(name, name), status=TaskStatus.READY)
-        tasks[name] = task
-        await task_list.add_task(task)
-    await task_list.send()
-
-    # Mark the first step as running before execution begins
-    if step_names:
-        tasks[step_names[0]].status = TaskStatus.RUNNING
-        await task_list.update()
-
-    # Generate a fresh thread_id for every workflow invocation.
+    # ── 6. Run workflow ──────────────────────────────────────────────────────────
     #
-    # Why not reuse cl.context.session.id?
-    # LangGraph's checkpointer accumulates state across calls that share the
-    # same thread_id.  Reusing the session id causes two problems:
-    #
-    #   1. Stale task_results: after a successful 3-step run, the checkpoint
-    #      holds all three agents in task_results.  The next run's first state
-    #      emission includes ALL THREE keys, so stream_steps reports every step
-    #      as "done" before any agent has actually run in the new call.
-    #
-    #   2. Sticky clarification_needed: the _or_bool reducer (True OR False = True)
-    #      means a True value from a prior run can never be reset to False by
-    #      starting a new invocation.  The SequentialAgent then sees
-    #      clarification_needed=True immediately and exits before running any step.
-    #
-    # Using a UUID per invocation gives each call a fresh checkpoint slot.
-    # Conversation context is passed explicitly via the `history` argument, so
-    # no cross-run state is lost.
+    # A fresh thread_id is generated per invocation so the LangGraph checkpointer
+    # always starts with a clean state (no stale task_results or sticky
+    # clarification_needed from a previous run on the same session thread).
+    # Conversation context is passed explicitly via `history` so nothing is lost.
     run_thread_id = f"{cl.context.session.id}-{uuid.uuid4().hex}"
+    logger.info("WORKFLOW", "starting", workflow=workflow_name,
+                steps=workflow.steps(), thread_id=run_thread_id,
+                agent_steps_mode=_cfg.AGENT_STEPS)
 
-    result: dict = {}
-    logger.info("WORKFLOW", "stream_steps start", workflow=workflow_name,
-                steps=step_names, thread_id=run_thread_id)
-    try:
-        async for completed_name, state in workflow.stream_steps(
-            message.content,
-            thread_id=run_thread_id,
-            history=history,
-        ):
-            if completed_name is None:
-                # Final yield — workflow fully complete
-                result = state
-                logger.info("WORKFLOW", "stream_steps complete", workflow=workflow_name)
-                break
+    result = await _execute_workflow(workflow, message.content, run_thread_id, history)
 
-            stopped_early = bool(state.get("clarification_needed") or state.get("error"))
-            logger.info("WORKFLOW", "step complete", step=completed_name,
-                        stopped_early=stopped_early,
-                        clarification_needed=state.get("clarification_needed"),
-                        error=state.get("error"))
-
-            # Mark the completed step FAILED if it stopped the pipeline, DONE otherwise.
-            # Remaining steps that never ran stay READY ("not started") — they are NOT
-            # marked FAILED because they were never attempted.
-            if completed_name in tasks:
-                tasks[completed_name].status = (
-                    TaskStatus.FAILED if stopped_early else TaskStatus.DONE
-                )
-                await task_list.update()
-
-            if stopped_early:
-                # Pipeline halted — leave unstarted steps in READY state so the
-                # sidebar shows them as "not started" rather than failed.
-                result = state
-                break
-
-            # Only advance the progress indicator to the next step when the
-            # current step completed successfully (checked above).
-            idx = step_names.index(completed_name) if completed_name in step_names else -1
-            if 0 <= idx < len(step_names) - 1:
-                tasks[step_names[idx + 1]].status = TaskStatus.RUNNING
-                await task_list.update()
-
-    except Exception as exc:
-        logger.error("WORKFLOW", f"stream_steps raised for workflow '{workflow_name}'",
-                     exc=exc, workflow=workflow_name)
-        # Mark all in-progress tasks as failed so the UI shows a clean terminal state
-        for task in tasks.values():
-            if task.status in (TaskStatus.READY, TaskStatus.RUNNING):
-                task.status = TaskStatus.FAILED
-        await task_list.update()
-        await cl.Message(
-            content=f"An error occurred while running **{workflow.display_name}**:\n```\n{exc}\n```"
-        ).send()
+    if result is None:
+        # _execute_workflow already sent an error message; nothing more to do.
         return
-
-    # ── Finalise task list ───────────────────────────────────────────────────────
-    # Only flip RUNNING → DONE.  This handles the single-step workflow case where
-    # the step is marked RUNNING before the loop but stream_steps exits via the
-    # "completed_name is None" path without ever yielding the step name.
-    #
-    # READY tasks are intentionally left as READY — they represent steps that
-    # were never attempted (pipeline stopped early).  Stamping them DONE would
-    # falsely imply they ran successfully.
-    #
-    # FAILED tasks are left unchanged (a failed step stays failed).
-    for task in tasks.values():
-        if task.status == TaskStatus.RUNNING:
-            task.status = TaskStatus.DONE
-    await task_list.update()
 
     # ── 7. Surface the final response ────────────────────────────────────────────
     ai_messages = [m for m in result.get("messages", []) if isinstance(m, AIMessage)]
