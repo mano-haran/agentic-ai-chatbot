@@ -5,6 +5,9 @@ description: >
   and provide specific actionable fixes with code examples.
 version: "1.0"
 
+# Short names recognised by the "switch to <alias>" command.
+aliases: [jenkins, build, ci, pipeline, ci/cd]
+
 # Shown when the user clicks the quick-start button on the welcome screen.
 action_prompt: |
   Ready to analyse your Jenkins build! Please share one of the following:

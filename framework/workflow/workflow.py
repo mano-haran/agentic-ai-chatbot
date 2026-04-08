@@ -230,6 +230,7 @@ class Workflow:
         intents: list[dict[str, str]] | None = None,
         display_name: str = "",
         action_prompt: str = "",
+        aliases: list[str] | None = None,
     ):
         self.name = name
         self.display_name = display_name or name   # falls back to internal name if not set
@@ -237,6 +238,7 @@ class Workflow:
         self.entry_agent = entry_agent
         self.intents: list[dict[str, str]] = intents or []
         self.action_prompt = action_prompt   # follow-up shown when the quick-start button is clicked
+        self.aliases: list[str] = [a.lower() for a in (aliases or [])]
         self._checkpointer = get_checkpointer()
         self._compiled = self.entry_agent.compile(checkpointer=self._checkpointer)
 

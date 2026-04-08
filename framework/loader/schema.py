@@ -52,3 +52,6 @@ class WorkflowFileSchema(BaseModel):
     action_prompt: str = ""  # question asked when the user clicks this workflow's
                              # quick-start button on the welcome screen;
                              # leave empty to omit the button for this workflow
+    aliases: list[str] = Field(default_factory=list)
+                             # short informal names recognised by the switch command,
+                             # e.g. ["confluence", "kb"] for the DevOps Knowledgebase

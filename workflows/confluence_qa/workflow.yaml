@@ -6,6 +6,9 @@ description: >
   Confluence pages when needed.
 version: "1.0"
 
+# Short names recognised by the "switch to <alias>" command.
+aliases: [confluence, kb, knowledge base, knowledgebase, devops kb, wiki]
+
 # Shown when the user clicks the quick-start button on the welcome screen.
 action_prompt: |
   I can answer questions about your internal DevOps processes and onboarding
@@ -204,7 +207,7 @@ entry_agent: devops_kb_pipeline
 
 # ── Intent patterns ────────────────────────────────────────────────────────────
 intents:
-  - pattern: "knowledge.base|wiki|documentation|internal.docs|process.doc"
+  - pattern: "confluence|knowledge.base|wiki|documentation|internal.docs|process.doc"
     workflow: devops_kb_search
   - pattern: "onboard|onboarding|new.hire|getting.started|setup.guide"
     workflow: devops_kb_search

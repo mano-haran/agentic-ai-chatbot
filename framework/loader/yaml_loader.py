@@ -52,6 +52,7 @@ class YAMLLoader:
             entry_agent=entry,
             intents=[i.model_dump() for i in schema.intents],
             action_prompt=schema.action_prompt,
+            aliases=schema.aliases,
         )
 
     # ------------------------------------------------------------------

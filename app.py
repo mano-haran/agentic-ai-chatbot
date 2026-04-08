@@ -409,35 +409,82 @@ async def on_start_workflow(action: cl.Action) -> None:
 
 def _detect_switch_command(text: str, workflows: dict[str, "Workflow"]) -> str | None:
     """
-    Detect explicit workflow switch commands like "switch to jenkins workflow" or
-    "use confluence workflow".  Returns the matched workflow name, or None.
-
-    Matches patterns such as:
-      - "switch to <name>"
-      - "use <name> workflow"
-      - "change to <name>"
-      - "go to <name>"
-      - "open <name>"
-    where <name> matches a workflow's display_name or internal name (case-insensitive).
+    Detect explicit switch commands like "switch to jenkins" or "use confluence".
+    Matches against each workflow's internal name, display name, first display-name
+    word, AND any aliases declared in the workflow YAML.
+    Returns the matched workflow name, or None.
     """
     normalized = text.strip().lower()
     prefixes = r"(?:switch\s+to|use|change\s+to|go\s+to|open|start)\s+"
     for wf in workflows.values():
         if wf.name == _FALLBACK_NAME:
             continue
-        # Build aliases: internal name and each word of the display name
-        aliases = [
+        # Collect all recognisable names for this workflow
+        candidates = {
             re.escape(wf.name.replace("_", " ")),
             re.escape(wf.display_name.lower()),
-        ]
-        # Also allow partial match on just the first word of the display name
+        }
         first_word = wf.display_name.split()[0].lower() if wf.display_name else ""
         if first_word:
-            aliases.append(re.escape(first_word))
-        pattern = rf"^{prefixes}({'|'.join(aliases)})(\s+workflow)?$"
+            candidates.add(re.escape(first_word))
+        # Add YAML-declared aliases (already lowercased on Workflow.__init__)
+        for alias in wf.aliases:
+            candidates.add(re.escape(alias))
+        pattern = rf"^{prefixes}({'|'.join(candidates)})(\s+workflow|\s+agent)?$"
         if re.match(pattern, normalized):
             return wf.name
     return None
+
+
+_LIST_COMMAND_RE = re.compile(
+    r"^(?:"
+    r"(?:list|show|display|available|what(?:\s+are)?)\s+(?:agents?|workflows?|capabilities|options?)"
+    r"|(?:agents?|workflows?)\s+(?:list|available)"
+    r"|switch\s+(?:agent|workflow)\s*$"
+    r"|/(?:agents?|workflows?|list|help)"
+    r")$",
+    re.IGNORECASE,
+)
+
+
+def _detect_list_command(text: str) -> bool:
+    """Return True if the message is a 'list all workflows' command."""
+    return bool(_LIST_COMMAND_RE.match(text.strip()))
+
+
+async def _send_workflow_list(workflows: dict[str, "Workflow"]) -> None:
+    """
+    Send a formatted list of available workflows with clickable switch buttons.
+    Short descriptions keep the response compact.
+    """
+    lines: list[str] = ["**Available agents — click to switch:**\n"]
+    actions: list[cl.Action] = []
+
+    for wf in workflows.values():
+        if wf.name == _FALLBACK_NAME:
+            continue
+        # One-line description: first sentence, capped at 80 chars
+        raw = wf.description.replace("\n", " ").strip()
+        dot = raw.find(". ")
+        short = (raw[: dot + 1] if dot != -1 else raw)[:80]
+        lines.append(f"• **{wf.display_name}** — {short}")
+        if wf.action_prompt:
+            actions.append(cl.Action(
+                name="start_workflow",
+                payload={"workflow": wf.name},
+                label=f"▶ {wf.display_name}",
+                description=short,
+            ))
+
+    lines.append(
+        "\nYou can also type **switch to \\<name\\>** — "
+        "e.g. *switch to jenkins* or *switch to confluence*."
+    )
+    await cl.Message(
+        content="\n".join(lines),
+        actions=actions if actions else None,
+        author="assistant",
+    ).send()
 
 
 @cl.on_message
@@ -485,6 +532,14 @@ async def on_message(message: cl.Message) -> None:
             content=f"*Switching to **{target_wf.display_name}***\n\n{prompt}",
             author="assistant",
         ).send()
+        return
+
+    # ── 1c. List-workflows command ────────────────────────────────────────────────
+    #
+    # Short commands like "list agents", "show workflows", "/list" etc. display
+    # all available workflows inline with clickable switch buttons.
+    if _detect_list_command(message.content):
+        await _send_workflow_list(_workflows)
         return
 
     # ── 2. Route ─────────────────────────────────────────────────────────────────
@@ -580,7 +635,7 @@ async def on_message(message: cl.Message) -> None:
     switched = current_workflow is not None and workflow_name != current_workflow
     if switched:
         await cl.Message(
-            content=f"*Switching topic → **{workflow.display_name}***",
+            content=f"*Switching agent → **{workflow.display_name}***",
             author="router",
         ).send()
 
