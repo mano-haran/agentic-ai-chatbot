@@ -17,9 +17,8 @@ Usage examples:
   python scripts/ingest_confluence.py --space DEV --reset
 
 Environment variables (set in .env):
-  CONFLUENCE_URL    Base URL, e.g. https://your-org.atlassian.net/wiki
-  CONFLUENCE_USER   Atlassian account email
-  CONFLUENCE_TOKEN  Atlassian API token (create at id.atlassian.com)
+  CONFLUENCE_URL    Base URL, e.g. https://confluence.your-company.com
+  CONFLUENCE_TOKEN  Personal Access Token (create in Confluence → Profile → Personal Access Tokens)
   CHROMA_PATH       Path for the Chroma DB (default: data/chroma)
   CHROMA_COLLECTION Collection name (default: confluence)
   EMBEDDING_PROVIDER  local | openai  (default: local)
@@ -136,9 +135,8 @@ def _fetch_space_pages(space_key: str) -> list[dict]:
 
     cf = Confluence(
         url=config.CONFLUENCE_URL,
-        username=config.CONFLUENCE_USER,
-        password=config.CONFLUENCE_TOKEN,
-        cloud=True,
+        token=config.CONFLUENCE_TOKEN,
+        cloud=False,
     )
 
     pages = []
@@ -167,9 +165,8 @@ def _fetch_page_by_id(page_id: str) -> dict:
 
     cf = Confluence(
         url=config.CONFLUENCE_URL,
-        username=config.CONFLUENCE_USER,
-        password=config.CONFLUENCE_TOKEN,
-        cloud=True,
+        token=config.CONFLUENCE_TOKEN,
+        cloud=False,
     )
     return cf.get_page_by_id(page_id, expand="body.storage")
 

@@ -38,7 +38,12 @@ def get_embeddings() -> Embeddings:
 
     if provider == "openai":
         from langchain_openai import OpenAIEmbeddings
-        return OpenAIEmbeddings(model=model or "text-embedding-3-small")
+        # Default to text-embedding-3-small when EMBEDDING_MODEL is not set.
+        # Previously config.EMBEDDING_MODEL defaulted to "all-MiniLM-L6-v2" (the local
+        # model name), which is not a valid OpenAI model and caused API errors.
+        openai_model = model or "text-embedding-3-small"
+        print(f"[embeddings] openai provider, model={openai_model}", flush=True)
+        return OpenAIEmbeddings(model=openai_model)
 
     if provider == "local":
         model_name = model or "all-MiniLM-L6-v2"
