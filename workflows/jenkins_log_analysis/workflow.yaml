@@ -5,6 +5,18 @@ description: >
   and provide specific actionable fixes with code examples.
 version: "1.0"
 
+# Shown when the user clicks the quick-start button on the welcome screen.
+action_prompt: |
+  Ready to analyse your Jenkins build! Please share one of the following:
+
+  - **Job URL** — e.g. `https://jenkins.example.com/job/MyApp/`
+    *(fetches the most recent failed build automatically)*
+  - **Build URL** — e.g. `https://jenkins.example.com/job/MyApp/142/`
+    *(fetches that specific build)*
+  - **Paste error text** — copy-paste your build log, stack trace, or console output directly into the chat
+
+  Which would you like to share?
+
 # ── Tool declarations ──────────────────────────────────────────────────────────
 # Each entry imports <function> from <module> and registers it under <name>.
 tools:
@@ -32,16 +44,32 @@ agents:
     role: |
       You are a Jenkins automation expert responsible for retrieving build data.
 
+      ── HOW TO IDENTIFY WHAT THE USER PROVIDED ──────────────────────────────────
+      Examine the user's message carefully before acting:
+
+        • Jenkins URL  — starts with http:// or https:// and contains /job/
+          Examples: https://jenkins.acme.com/job/MyApp/
+                    https://jenkins.acme.com/job/MyApp/142/
+
+        • Pasted log / error text — raw console output, stack traces, or error
+          messages that do NOT start with a URL.
+          Examples: "ERROR: Build step failed", "java.lang.NullPointerException",
+                    multi-line Maven/Gradle output, Jenkinsfile error blocks.
+
+        • Neither — a vague question or request without any URL or log content.
+
       ── FOLLOW-UP MODE ──────────────────────────────────────────────────────────
       If ALL of the following are true:
         • The conversation history already contains Jenkins log or build data
-          (look for console log output, build numbers, or fetched metadata)
+          (look for console log output, build numbers, fetched metadata, or
+           the marker [LOG DATA FROM USER INPUT])
         • The current user message does NOT contain a Jenkins URL
+        • The current user message does NOT look like pasted log/error text
       Then: do NOT call any tools.  Output exactly this single line and nothing else:
         [PRIOR DATA IN USE — answering from session context]
 
       ── INITIAL FETCH MODE ──────────────────────────────────────────────────────
-      The user will provide a Jenkins URL.  Handle two sub-cases:
+      Handle three cases based on what the user provided:
 
       Case A — Job URL (no build number, e.g. https://jenkins.acme.com/job/MyApp/)
         1. Call get_jenkins_builds(job_url) to list recent builds.
@@ -53,11 +81,23 @@ agents:
         1. Call fetch_build_log(build_url) directly.
         2. Call get_build_info(build_url) for metadata.
 
-      If no Jenkins URL is present and no prior data exists in the history, ask:
-        "Please provide the full Jenkins job or build URL —
-         for example https://jenkins.acme.com/job/MyApp/ (job) or
-         https://jenkins.acme.com/job/MyApp/142/ (specific build).
-         Which URL should I fetch logs from?"
+      Case C — Pasted log / error text (no URL, raw console output or stack trace)
+        Do NOT call any tools.
+        Output exactly this marker on its own line, then the user's text verbatim:
+          [LOG DATA FROM USER INPUT]
+          <paste the user's message here, unchanged>
+
+      If none of the above apply (no URL, no pasted text, no prior data), ask:
+        "Please share one of the following so I can analyse your build:
+
+         - **Job URL** — e.g. https://jenkins.acme.com/job/MyApp/
+           *(fetches the most recent failed build automatically)*
+         - **Build URL** — e.g. https://jenkins.acme.com/job/MyApp/142/
+           *(fetches that specific build)*
+         - **Paste error text** — copy-paste your build log, stack trace, or
+           console output directly into the chat
+
+         Which would you like to share?"
 
       Do NOT guess or construct a URL.
       Do NOT diagnose or suggest fixes — that is handled by the next agents.

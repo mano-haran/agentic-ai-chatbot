@@ -35,6 +35,7 @@ Run:
   chainlit run app.py
 """
 
+import re
 import uuid
 
 import chainlit as cl
@@ -152,15 +153,110 @@ async def on_chat_start() -> None:
     logger.info("SESSION", "chat started", session_id=session_id,
                 loaded_workflows=list(_workflows.keys()))
 
-    lines = [f"- **{w.display_name}**: {w.description}" for w in _workflows.values() if w.name != _FALLBACK_NAME]
+    # Build capability descriptions with per-workflow usage hints
+    _USAGE_HINTS: dict[str, str] = {
+        "jenkins_log_analysis": (
+            "Share a **Job URL**, a **Build URL**, or **paste error text** directly."
+        ),
+        "confluence_qa": (
+            "Ask any question about your DevOps processes or onboarding procedures."
+        ),
+    }
+
+    lines: list[str] = []
+    for wf in _workflows.values():
+        if wf.name == _FALLBACK_NAME:
+            continue
+        hint = _USAGE_HINTS.get(wf.name, "")
+        hint_str = f"\n  ↳ {hint}" if hint else ""
+        lines.append(f"- **{wf.display_name}**: {wf.description}{hint_str}")
     capabilities = "\n".join(lines) if lines else "_No workflows loaded._"
+
+    # Build quick-start action buttons for workflows that have an action_prompt
+    actions = [
+        cl.Action(
+            name="start_workflow",
+            payload={"workflow": wf.name},
+            label=f"▶ {wf.display_name}",
+            description=wf.description,
+        )
+        for wf in _workflows.values()
+        if wf.name != _FALLBACK_NAME and wf.action_prompt
+    ]
+
     await cl.Message(
         content=(
             "Hello! I'm your DevOps AI assistant.\n\n"
             f"**Available capabilities:**\n{capabilities}\n\n"
-            "Describe what you need and I'll route your request automatically."
-        )
+            "Type your request and I'll route it automatically — or click a button below to get started."
+        ),
+        actions=actions if actions else None,
     ).send()
+
+
+@cl.action_callback("start_workflow")
+async def on_start_workflow(action: cl.Action) -> None:
+    """
+    Handles clicks on the quick-start workflow buttons shown on the welcome screen.
+
+    Sets the session's current_workflow and awaiting_clarification so the next
+    user message is routed directly to the chosen workflow.  Sends the workflow's
+    action_prompt as the assistant's first message to guide the user.
+    """
+    workflow_name: str = action.payload.get("workflow", "")
+    workflow = _workflows.get(workflow_name)
+    if not workflow:
+        await cl.Message(content="Workflow not found.").send()
+        return
+
+    # Pre-select the workflow — next message bypasses intent routing
+    cl.user_session.set("current_workflow", workflow_name)
+    cl.user_session.set("awaiting_clarification", True)
+
+    history: list = cl.user_session.get("history", [])
+    prompt = workflow.action_prompt.strip()
+
+    # Record the button click in history as a synthetic user message
+    cl.user_session.set("history", history + [
+        HumanMessage(content=f"[started {workflow.display_name}]"),
+        AIMessage(content=prompt),
+    ])
+
+    logger.info("SESSION", "quick-start button clicked", workflow=workflow_name)
+    await cl.Message(content=prompt, author="assistant").send()
+
+
+def _detect_switch_command(text: str, workflows: dict[str, "Workflow"]) -> str | None:
+    """
+    Detect explicit workflow switch commands like "switch to jenkins workflow" or
+    "use confluence workflow".  Returns the matched workflow name, or None.
+
+    Matches patterns such as:
+      - "switch to <name>"
+      - "use <name> workflow"
+      - "change to <name>"
+      - "go to <name>"
+      - "open <name>"
+    where <name> matches a workflow's display_name or internal name (case-insensitive).
+    """
+    normalized = text.strip().lower()
+    prefixes = r"(?:switch\s+to|use|change\s+to|go\s+to|open|start)\s+"
+    for wf in workflows.values():
+        if wf.name == _FALLBACK_NAME:
+            continue
+        # Build aliases: internal name and each word of the display name
+        aliases = [
+            re.escape(wf.name.replace("_", " ")),
+            re.escape(wf.display_name.lower()),
+        ]
+        # Also allow partial match on just the first word of the display name
+        first_word = wf.display_name.split()[0].lower() if wf.display_name else ""
+        if first_word:
+            aliases.append(re.escape(first_word))
+        pattern = rf"^{prefixes}({'|'.join(aliases)})(\s+workflow)?$"
+        if re.match(pattern, normalized):
+            return wf.name
+    return None
 
 
 @cl.on_message
@@ -176,6 +272,31 @@ async def on_message(message: cl.Message) -> None:
                  awaiting_clarification=awaiting_clarification,
                  history_len=len(history),
                  message=message.content[:120])
+
+    # ── 1b. Natural-language workflow switch command ──────────────────────────────
+    #
+    # Allow the user to explicitly switch workflows at any time by typing a
+    # command like "switch to Jenkins workflow" or "use Confluence workflow".
+    # This is checked before routing so it always takes effect immediately,
+    # even when awaiting_clarification or mid-workflow.
+    switch_target = _detect_switch_command(message.content, _workflows)
+    if switch_target and switch_target in _workflows:
+        target_wf = _workflows[switch_target]
+        cl.user_session.set("current_workflow", switch_target)
+        cl.user_session.set("awaiting_clarification", True)
+        prompt = target_wf.action_prompt.strip() if target_wf.action_prompt else (
+            f"Switched to **{target_wf.display_name}**. How can I help?"
+        )
+        cl.user_session.set("history", history + [
+            HumanMessage(content=message.content),
+            AIMessage(content=prompt),
+        ])
+        logger.info("ROUTING", "explicit workflow switch", target=switch_target)
+        await cl.Message(
+            content=f"*Switching to **{target_wf.display_name}***\n\n{prompt}",
+            author="assistant",
+        ).send()
+        return
 
     # ── 2. Route ─────────────────────────────────────────────────────────────────
     #

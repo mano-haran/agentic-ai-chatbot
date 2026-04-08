@@ -228,12 +228,14 @@ class Workflow:
         entry_agent: BaseAgent,
         intents: list[dict[str, str]] | None = None,
         display_name: str = "",
+        action_prompt: str = "",
     ):
         self.name = name
         self.display_name = display_name or name   # falls back to internal name if not set
         self.description = description
         self.entry_agent = entry_agent
         self.intents: list[dict[str, str]] = intents or []
+        self.action_prompt = action_prompt   # follow-up shown when the quick-start button is clicked
         self._checkpointer = get_checkpointer()
         self._compiled = self.entry_agent.compile(checkpointer=self._checkpointer)
 

@@ -5,6 +5,18 @@ description: >
   knowledge base. Retrieves relevant pages and synthesises grounded answers with citations.
 version: "1.0"
 
+# Shown when the user clicks the quick-start button on the welcome screen.
+action_prompt: |
+  I can search your Confluence knowledge base to answer questions about DevOps
+  processes, tooling, and onboarding.
+
+  What would you like to know? For example:
+  - "How do I onboard a new developer?"
+  - "What is the deployment process for production?"
+  - "How do I set up access to Jenkins?"
+
+  What process or topic do you want to look up?
+
 # ── Tool declarations ──────────────────────────────────────────────────────────
 tools:
   - name: search_confluence

@@ -49,3 +49,6 @@ class WorkflowFileSchema(BaseModel):
     tools: list[ToolRef] = Field(default_factory=list)
     agents: list[AgentSchema] = Field(default_factory=list)
     intents: list[IntentSchema] = Field(default_factory=list)
+    action_prompt: str = ""  # question asked when the user clicks this workflow's
+                             # quick-start button on the welcome screen;
+                             # leave empty to omit the button for this workflow
