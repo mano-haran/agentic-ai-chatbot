@@ -339,6 +339,7 @@ class IntentRouter:
         message: str,
         current_workflow: str | None = None,
         history: list | None = None,
+        strict: bool = False,
     ) -> RoutingDecision:
         """
         Route with awareness of the ongoing conversation.
@@ -351,9 +352,16 @@ class IntentRouter:
             message:          New user message.
             current_workflow: Workflow active in this session, or None.
             history:          Prior conversation messages, or empty list.
+            strict:           When True, skip the short-message heuristic and
+                              always use the LLM to decide whether the message is
+                              a continuation.  Set by the caller when the previous
+                              turn ended with a workflow asking for clarification —
+                              short unrelated replies like "hello" or "never mind"
+                              should be treated as topic switches, not as answers
+                              to the clarification question.
         """
         logger.debug("ROUTING", "route_with_context() called",
-             current_workflow=current_workflow, message=message[:120])
+                     current_workflow=current_workflow, strict=strict, message=message[:120])
 
         # Always re-route fresh from the fallback — it's a catch-all, not a domain,
         # so there's no meaningful "continuation" to detect.
@@ -363,8 +371,8 @@ class IntentRouter:
             logger.debug("ROUTING", "no active workflow → fresh route()")
             return await self.route(message)
 
-        continuation = await self._is_continuation(message, current_workflow, history or [])
-        logger.debug("ROUTING", "continuation check", result=continuation, workflow=current_workflow)
+        continuation = await self._is_continuation(message, current_workflow, history or [], strict=strict)
+        logger.debug("ROUTING", "continuation check", result=continuation, strict=strict, workflow=current_workflow)
         if continuation:
             return RoutingDecision(workflow=current_workflow, clarification=None)
 
@@ -377,15 +385,27 @@ class IntentRouter:
         message: str,
         current_workflow: str,
         history: list,
+        strict: bool = False,
     ) -> bool:
         """
         Returns True if the message continues the current workflow.
 
         Heuristics first (free); LLM only for genuinely ambiguous cases.
+
+        Args:
+            strict: When True, skip the short-message length heuristic and
+                    always use the LLM for continuation detection.  Used after
+                    a workflow step asked for clarification so that short
+                    unrelated replies (e.g. "hello", "never mind") are not
+                    incorrectly treated as answers to the clarification question.
         """
         stripped = message.strip()
 
-        if len(stripped) < 35:
+        # In normal mode treat very short messages as continuations (e.g. "ok",
+        # "yes", "retry") — this avoids an LLM call for the common case.
+        # In strict mode (post-clarification) skip this shortcut so we can
+        # detect topic switches even for short messages.
+        if not strict and len(stripped) < 35:
             return True
 
         if _FOLLOW_UP_RE.match(stripped):

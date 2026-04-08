@@ -189,21 +189,35 @@ async def on_message(message: cl.Message) -> None:
     #   mis-classified as a continuation of whatever ran before.
     #
     #   Case B — a WORKFLOW STEP asked for more information (e.g. "please provide
-    #   the build logs").  current_workflow is still set to that workflow's name
-    #   because we intentionally did NOT reset it in step 8 below.
-    #   The user's answer (e.g. the log contents) must go back to the SAME workflow
-    #   so the agent can process the answer with the conversation history intact.
-    #   If we ran route() here the message would often fail to match the workflow's
-    #   regex patterns and land on the fallback instead, causing an infinite loop
-    #   where the workflow keeps asking for the same information.
+    #   the Jenkins URL").  current_workflow is still set to that workflow's name.
+    #
+    #   Previous behaviour: bypass routing entirely → always sent the reply back to
+    #   the same workflow.  Problem: if the user typed something unrelated (topic
+    #   switch), the same workflow kept running and produced wrong output.
+    #
+    #   New behaviour: use route_with_context() which checks whether the message
+    #   continues the current workflow or starts a new topic:
+    #     • Short messages (< 35 chars) are still treated as continuations — a
+    #       Jenkins URL reply is typically longer and will be evaluated by the LLM.
+    #     • Longer messages that look like a different topic are routed fresh so the
+    #       user lands on the right workflow (or the general assistant).
+    #     • Messages matching another workflow's intent patterns route to that
+    #       workflow immediately via regex, without an LLM call.
     #
     if awaiting_clarification:
         cl.user_session.set("awaiting_clarification", False)
         if current_workflow and current_workflow != _FALLBACK_NAME:
-            # Case B: bypass routing — send the user's answer directly to the
-            # workflow that asked the question.  History already contains the
-            # workflow's clarifying question, so the agent has full context.
-            decision: RoutingDecision = RoutingDecision(workflow=current_workflow, clarification=None)
+            # Case B: let route_with_context() decide — it returns the current
+            # workflow for likely replies, and routes fresh on topic switches.
+            # strict=True disables the short-message heuristic so that brief
+            # unrelated replies like "hello" or "never mind" are checked by the
+            # LLM instead of being blindly treated as continuations.
+            decision = await _router.route_with_context(
+                message.content,
+                current_workflow=current_workflow,
+                history=history,
+                strict=True,
+            )
         else:
             # Case A: route the user's answer fresh so we can pick the right
             # workflow from their reply to the router's question.
