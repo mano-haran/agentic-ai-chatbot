@@ -1,0 +1,20 @@
+{
+    "status": "Confluence Q&A",
+    "tasks": [
+        {
+            "title": "Analyse Query",
+            "status": "running",
+            "forId": null
+        },
+        {
+            "title": "Retrieve Knowledge",
+            "status": "ready",
+            "forId": null
+        },
+        {
+            "title": "Synthesise Answer",
+            "status": "ready",
+            "forId": null
+        }
+    ]
+}

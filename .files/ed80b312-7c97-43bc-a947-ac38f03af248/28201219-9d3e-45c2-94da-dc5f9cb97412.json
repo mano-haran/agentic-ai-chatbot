@@ -1,0 +1,20 @@
+{
+    "status": "Jenkins Log Analysis",
+    "tasks": [
+        {
+            "title": "Fetch Build Logs",
+            "status": "ready",
+            "forId": null
+        },
+        {
+            "title": "Analyse Failure",
+            "status": "ready",
+            "forId": null
+        },
+        {
+            "title": "Suggest Fixes",
+            "status": "ready",
+            "forId": null
+        }
+    ]
+}

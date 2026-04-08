@@ -1,0 +1,10 @@
+{
+    "status": "General Assistant",
+    "tasks": [
+        {
+            "title": "General Assistant",
+            "status": "ready",
+            "forId": null
+        }
+    ]
+}
