@@ -179,7 +179,10 @@ def _page_to_chunks(page: dict) -> list[dict]:
     url = f"{base_url}/pages/viewpage.action?pageId={page_id}" if page_id else base_url
     html = page.get("body", {}).get("storage", {}).get("value", "")
     if html:
-        return _html_to_sections(html, title, url)
+        chunks = _html_to_sections(html, title, url)
+        for chunk in chunks:
+            chunk["page_id"] = page_id  # ← ADD THIS
+        return chunks
     return []
 
 
@@ -227,7 +230,12 @@ def _upsert_chunks(store, chunks: list[dict]) -> int:
     docs = [
         Document(
             page_content=c["text"],
-            metadata={"title": c["title"], "section": c["section"], "url": c["url"]},
+            metadata={
+                "title": c["title"],
+                "section": c["section"],
+                "url": c["url"],
+                "page_id": c.get("page_id", ""),  # ← ADD THIS
+            },
         )
         for c in chunks
         if c.get("text", "").strip()
