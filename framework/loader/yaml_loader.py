@@ -88,6 +88,7 @@ class YAMLLoader:
                     description=schema.description,
                     temperature=schema.temperature,
                     max_tokens=schema.max_tokens,
+                    check_clarification=schema.check_clarification,
                 )
             case "sequential":
                 agent = SequentialAgent(

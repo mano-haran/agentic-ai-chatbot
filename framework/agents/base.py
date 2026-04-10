@@ -110,7 +110,8 @@ def make_agent_node(agent: "BaseAgent"):
         # will call tools, hit an error, and then ask the user a question.  That
         # final request still signals clarification_needed even though tools ran.
         clarification = (
-            last_ai is not None
+            agent.check_clarification
+            and last_ai is not None
             and not has_pending_tool_calls
             and _needs_clarification(content)
         )
@@ -140,10 +141,11 @@ class BaseAgent(ABC):
                        (SequentialAgent, ParallelAgent, LoopAgent, RouterAgent).
     """
 
-    def __init__(self, name: str, description: str = "", display_name: str = ""):
+    def __init__(self, name: str, description: str = "", display_name: str = "", check_clarification: bool = True):
         self.name = name
         self.description = description
         self.display_name = display_name or name   # falls back to internal name if not set
+        self.check_clarification = check_clarification
         self._graph = None
 
     @abstractmethod
