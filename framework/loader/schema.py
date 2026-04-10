@@ -31,13 +31,6 @@ class AgentSchema(BaseModel):
 
     description: str = ""
 
-    # When False, the clarification-detection heuristic is skipped for this
-    # agent.  Set to False for pipeline-middle agents that output structured or
-    # verbatim content (e.g. RAG search results, fetched page content) that may
-    # legitimately contain "?" characters without the agent asking the user for
-    # more input.  Defaults to True so existing agents are unaffected.
-    check_clarification: bool = True
-
 
 class IntentSchema(BaseModel):
     """Maps a regex pattern to a workflow name for fast intent routing."""
