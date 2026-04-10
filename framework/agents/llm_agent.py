@@ -48,8 +48,9 @@ class LLMAgent(BaseAgent):
         display_name: str = "",
         temperature: float = 0.0,
         max_tokens: int = config.MAX_TOKENS_HARD_LIMIT,
+        check_clarification: bool = True,
     ):
-        super().__init__(name, description or role[:120], display_name)
+        super().__init__(name, description or role[:120], display_name, check_clarification)
         self.role = role
         self.model = model
         self._tools: list[StructuredTool] = tools or []
