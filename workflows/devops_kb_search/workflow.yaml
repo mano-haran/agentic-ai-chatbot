@@ -78,7 +78,6 @@ agents:
     display_name: Locate Pages
     type: llm
     description: Finds relevant Confluence page IDs using RAG, falls back to CQL search.
-    check_clarification: false  # outputs PAGE_RESULTS which may contain "?" in section titles
     role: |
       You are a knowledge retrieval specialist. Your job is to find which
       Confluence pages contain the answer to the user's question.
@@ -123,7 +122,6 @@ agents:
     display_name: Fetch Pages
     type: llm
     description: Fetches full Confluence page content by page ID with smart compression.
-    check_clarification: false  # outputs verbatim page content which often contains "?"
     role: |
       You are a content retrieval agent. Your job is to fetch the full content
       of Confluence pages identified in the previous step.

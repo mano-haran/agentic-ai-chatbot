@@ -6,7 +6,7 @@ from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode
 
 import config
-from framework.agents.base import BaseAgent
+from framework.agents.base import BaseAgent, CLARIFICATION_INSTRUCTION
 from framework.core.state import AgentState
 from framework.providers.factory import get_llm
 
@@ -48,9 +48,8 @@ class LLMAgent(BaseAgent):
         display_name: str = "",
         temperature: float = 0.0,
         max_tokens: int = config.MAX_TOKENS_HARD_LIMIT,
-        check_clarification: bool = True,
     ):
-        super().__init__(name, description or role[:120], display_name, check_clarification)
+        super().__init__(name, description or role[:120], display_name)
         self.role = role
         self.model = model
         self._tools: list[StructuredTool] = tools or []
@@ -107,7 +106,11 @@ class LLMAgent(BaseAgent):
         if all_tools:
             llm = llm.bind_tools(all_tools)
 
-        system_msg = SystemMessage(content=self.role)
+        # Append the clarification protocol to the agent's role so every agent
+        # knows exactly how to signal that it needs more information from the user.
+        # The framework (make_agent_node) detects and strips the structured marker
+        # before the response reaches the user.
+        system_msg = SystemMessage(content=self.role + CLARIFICATION_INSTRUCTION)
 
         # Async node so we stay on the event loop and avoid thread-executor
         # issues that can cause silent failures when llm.invoke() is called

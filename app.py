@@ -674,25 +674,31 @@ async def on_message(message: cl.Message) -> None:
     final = _extract_content(ai_messages[-1].content) if ai_messages else "Workflow completed with no output."
     logger.debug("RESPONSE", "sending final response",
                  workflow=workflow_name, content_preview=final[:150])
-    await cl.Message(content=final).send()
 
-    # ── 8. If a step asked for clarification, pause here ─────────────────────────
-    # The clarification question has already been shown as the final AI message.
+    # ── 8. If a step asked for clarification, format questions and pause ──────────
+    #
+    # make_agent_node() has already stripped the raw CLARIFICATION_NEEDED marker
+    # from the AIMessage content.  `final` contains only the human-readable
+    # explanation the agent wrote before the marker.  We append the questions as
+    # a formatted plain-English list so the user sees a complete, natural message.
     #
     # Intentionally NOT resetting current_workflow here.  Keeping it set is what
     # distinguishes "workflow step asked" (case B) from "router asked" (case A) in
     # the routing block above.  On the next turn, step 2 will see
     # awaiting_clarification=True AND current_workflow=<this workflow> and bypass
     # routing entirely, sending the user's answer straight back here.
-    #
-    # If we reset current_workflow to None, step 2 would fall into case A and call
-    # route() fresh.  The user's answer (e.g. raw log output) rarely contains the
-    # workflow's trigger keywords, so it would land on the fallback — and the
-    # workflow would never receive the information it asked for.
     if result.get("clarification_needed"):
+        questions: list[str] = result.get("clarification_questions", [])
+        if questions:
+            q_lines = "\n".join(f"- {q}" for q in questions)
+            separator = "\n\n" if final.strip() else ""
+            final = f"{final}{separator}To continue, please provide the following:\n{q_lines}"
+        await cl.Message(content=final).send()
         cl.user_session.set("awaiting_clarification", True)
         cl.user_session.set("history", compact_history(extract_history(result)))
         return
+
+    await cl.Message(content=final).send()
 
     # ── 9. Persist clean history ─────────────────────────────────────────────────
     cl.user_session.set("history", compact_history(extract_history(result)))

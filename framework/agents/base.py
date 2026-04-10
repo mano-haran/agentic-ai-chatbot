@@ -1,37 +1,61 @@
+import json
 from abc import ABC, abstractmethod
 from typing import Any, AsyncIterator
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import StateGraph
 
 from framework.core.log import logger
 
-# Phrases that indicate the agent is requesting more input from the user.
-# Used as a fallback when the response doesn't contain a literal "?".
-# LLMs sometimes phrase clarification requests as statements ("Please provide …")
-# rather than questions, so checking only for "?" is too fragile.
-_CLARIFICATION_PHRASES = (
-    "please provide",
-    "could you provide",
-    "can you provide",
-    "please share",
-    "please give me",
-    "i need a jenkins",
-    "i need the jenkins",
-    "i'll need",
-    "i will need",
-    "no jenkins url",
-    "no url",
-    "missing url",
-)
+# ── Clarification protocol ─────────────────────────────────────────────────────
+# Appended to every LLMAgent system prompt so all agents know how to signal that
+# they need more information from the user.  The framework strips the marker from
+# the stored AIMessage and formats the questions as plain English before display.
+
+CLARIFICATION_INSTRUCTION = """\
+
+────────────────────────────────────────────────────────────────────────────────
+CLARIFICATION PROTOCOL
+If you cannot complete your task because essential information is missing from
+the conversation, write a brief explanation, then end your response with EXACTLY:
+
+CLARIFICATION_NEEDED: {"questions": ["<question 1>", "<question 2>"]}
+
+Rules:
+• The CLARIFICATION_NEEDED line must be the very last line of your response.
+• Only use it when you genuinely cannot proceed without the missing information.
+• Do not ask for information that is already in the conversation.
+• If you can proceed (even partially), do so instead of asking.
+────────────────────────────────────────────────────────────────────────────────"""
+
+_CLARIFICATION_PREFIX = "CLARIFICATION_NEEDED:"
 
 
-def _needs_clarification(content: str) -> bool:
-    """Return True if the content signals the agent needs more user input."""
-    if "?" in content:
-        return True
-    lower = content.lower()
-    return any(phrase in lower for phrase in _CLARIFICATION_PHRASES)
+def _parse_clarification(content: str) -> tuple[str, list[str]]:
+    """
+    Detect and extract the structured clarification signal from agent output.
+
+    Scans the response bottom-up for a line starting with CLARIFICATION_NEEDED:
+    followed by a JSON object.  Returns (clean_content, questions) where
+    clean_content has the marker line stripped, and questions is the parsed list.
+    Returns (original_content, []) if no valid marker is found.
+    """
+    lines = content.split("\n")
+    for i in range(len(lines) - 1, -1, -1):
+        line = lines[i].strip()
+        if line.startswith(_CLARIFICATION_PREFIX):
+            json_str = line[len(_CLARIFICATION_PREFIX):].strip()
+            try:
+                data = json.loads(json_str)
+                questions = data.get("questions", [])
+                if isinstance(questions, list) and questions:
+                    clean = "\n".join(lines[:i]).rstrip()
+                    return clean, [str(q) for q in questions]
+            except (json.JSONDecodeError, AttributeError):
+                pass
+            # Found prefix but couldn't parse — treat as no clarification signal
+            break
+    return content, []
 
 
 def make_agent_node(agent: "BaseAgent"):
@@ -40,27 +64,15 @@ def make_agent_node(agent: "BaseAgent"):
     Used by SequentialAgent, RouterAgent, and ParallelAgent to embed
     sub-agents as nodes inside a parent graph.
 
-    After each run, detects whether the agent is asking for clarification
-    and sets clarification_needed=True in state so SequentialAgent can stop early.
-
-    Clarification detection
-    -----------------------
-    We look at the FINAL AI message produced during this step and check two things:
-      1. It has no pending tool_calls — meaning the agent is done with tools and
-         is giving its terminal response (not mid-way through a ReAct loop).
-      2. Its content contains a question mark.
-
-    The previous check also required that NO tools were called at all during the
-    step.  That was too strict: an agent with tools (e.g. log_fetcher_agent) might
-    call get_jenkins_builds, receive an error because no job name was given, and
-    then ask "Please provide the job name?"  Since a ToolMessage exists, the old
-    check silently passed clarification_needed=False, and the next agent in the
-    SequentialAgent would start running — even though the first step never got the
-    information it needed.
-
-    The corrected check ignores whether tools were called during the step and
-    focuses only on the nature of the terminal response: if the agent's last word
-    is a question, it needs more input before the workflow can continue.
+    After each run, checks whether the agent signalled that it needs
+    clarification by outputting a structured CLARIFICATION_NEEDED marker
+    (see CLARIFICATION_INSTRUCTION).  If detected:
+      • The marker is stripped from the stored AIMessage so the raw JSON is
+        never shown to the user.
+      • clarification_needed=True is set in state so SequentialAgent can
+        stop the pipeline early.
+      • clarification_questions=[...] is populated in state so app.py can
+        format the questions as plain English before displaying them.
 
     Config forwarding
     -----------------
@@ -76,8 +88,6 @@ def make_agent_node(agent: "BaseAgent"):
         logger.debug("AGENT", "start", agent=agent.name, msg_count=msgs_before)
 
         try:
-            # Forward the LangGraph config so callbacks (including those registered
-            # by astream_events) propagate into the agent's internal graph.
             result = await agent.compile().ainvoke(state, config=config)
         except Exception as exc:
             logger.error("AGENT", f"agent '{agent.name}' raised during ainvoke", exc=exc)
@@ -88,11 +98,10 @@ def make_agent_node(agent: "BaseAgent"):
         last_ai = next((m for m in reversed(new_msgs) if isinstance(m, AIMessage)), None)
 
         # has_pending_tool_calls: True when the last AI message is still requesting
-        # a tool call (i.e. mid-ReAct-loop).  False when the agent has settled on
-        # a final response (with or without having used tools earlier in the step).
+        # a tool call (i.e. mid-ReAct-loop).  We only check the terminal response.
         has_pending_tool_calls = bool(getattr(last_ai, "tool_calls", None)) if last_ai else False
 
-        # content may be a list (Anthropic content blocks) — normalise to str for logging.
+        # Normalise content to str (Anthropic returns list-of-blocks for tool-use responses).
         content = last_ai.content if last_ai else ""
         if isinstance(content, list):
             content = " ".join(
@@ -100,25 +109,32 @@ def make_agent_node(agent: "BaseAgent"):
                 for b in content
             )
 
-        # Detect clarification: the agent's final response asks for more input.
-        # We check for "?" AND common "please provide" style phrases because LLMs
-        # sometimes phrase clarification requests as statements rather than questions,
-        # which means a "?" check alone misses them and the pipeline continues
-        # incorrectly.
-        # We intentionally do NOT check whether tools were called during the step —
-        # a tool-using agent that couldn't complete its task (e.g. missing URL)
-        # will call tools, hit an error, and then ask the user a question.  That
-        # final request still signals clarification_needed even though tools ran.
-        clarification = (
-            agent.check_clarification
-            and last_ai is not None
-            and not has_pending_tool_calls
-            and _needs_clarification(content)
-        )
+        if last_ai is not None and not has_pending_tool_calls:
+            clean_content, questions = _parse_clarification(content)
+        else:
+            clean_content, questions = content, []
 
-        if clarification:
-            logger.info("AGENT", "clarification needed", agent=agent.name, response_preview=content[:150])
-            result = {**result, "clarification_needed": True}
+        if questions:
+            logger.info("AGENT", "clarification needed", agent=agent.name,
+                        questions=questions, response_preview=clean_content[:150])
+
+            # Replace the AIMessage with a clean version (marker stripped) so the
+            # raw JSON is never stored in conversation history or shown to the user.
+            msgs = result.get("messages", [])
+            clean_ai = AIMessage(content=clean_content, id=getattr(last_ai, "id", None))
+            msgs_cleaned = [clean_ai if m is last_ai else m for m in msgs]
+
+            result = {
+                **result,
+                "messages": msgs_cleaned,
+                # Also clean task_results so downstream agents don't see the marker.
+                "task_results": {
+                    **result.get("task_results", {}),
+                    agent.name: clean_content,
+                },
+                "clarification_needed": True,
+                "clarification_questions": questions,
+            }
         else:
             logger.debug("AGENT", "complete", agent=agent.name, response_preview=content[:150])
 
@@ -141,11 +157,10 @@ class BaseAgent(ABC):
                        (SequentialAgent, ParallelAgent, LoopAgent, RouterAgent).
     """
 
-    def __init__(self, name: str, description: str = "", display_name: str = "", check_clarification: bool = True):
+    def __init__(self, name: str, description: str = "", display_name: str = ""):
         self.name = name
         self.description = description
         self.display_name = display_name or name   # falls back to internal name if not set
-        self.check_clarification = check_clarification
         self._graph = None
 
     @abstractmethod
