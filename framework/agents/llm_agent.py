@@ -78,6 +78,8 @@ class LLMAgent(BaseAgent):
                 "task_results": {},
                 "metadata": {},
                 "error": None,
+                "clarification_needed": False,
+                "clarification_questions": [],
             })
             msgs = result.get("messages", [])
             return msgs[-1].content if msgs else "(no response)"

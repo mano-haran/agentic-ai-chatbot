@@ -31,6 +31,7 @@ def _build_initial_state(
         "metadata": metadata or {},
         "error": None,
         "clarification_needed": False,
+        "clarification_questions": [],
     }
 
 
@@ -450,7 +451,8 @@ class Workflow:
             elif evt == "on_chain_end" and name in expected_steps:
                 output = data.get("output", {})
                 if isinstance(output, dict):
-                    for key in ("clarification_needed", "error", "next_agent"):
+                    for key in ("clarification_needed", "error", "next_agent",
+                                "clarification_questions"):
                         if key in output:
                             partial[key] = output[key]
                 yield ("step_done", name, dict(partial))
