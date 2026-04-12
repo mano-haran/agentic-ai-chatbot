@@ -1077,3 +1077,174 @@ Open [http://localhost:8000](http://localhost:8000) and ask:
 | `pydantic` | YAML schema validation |
 | `pyyaml` | YAML file parsing |
 | `python-dotenv` | Load `.env` file |
+
+---
+
+## 14. RAG Strategy Configuration
+
+The DevOps Knowledgebase workflow uses a layered RAG pipeline. Each layer is independently optional and enabled via environment variables. All layers are air-gapped safe.
+
+### Layer 0 — Vector Search (always active)
+
+No configuration needed.  Chroma stores embeddings produced during ingestion.  Query time: cosine similarity search.
+
+```bash
+# Ingest (baseline — always required)
+python scripts/ingest_confluence.py --space DEV
+```
+
+---
+
+### Layer 1 — Context-Aware Chunking (Docling)
+
+Improves chunk quality: tables stay intact, code blocks are atomic, every chunk carries heading breadcrumbs.
+
+**Install**:
+```bash
+pip install 'docling>=2.0.0'
+```
+
+**Configure** (`.env`):
+```env
+CHUNKING_STRATEGY=docling
+```
+
+**Air-gapped**: Docling's HTML backend needs no ML models for conversion. The `HybridChunker` uses a tokenizer — point it to a local directory:
+```env
+DOCLING_TOKENIZER_MODEL=models/all-MiniLM-L6-v2
+TRANSFORMERS_OFFLINE=1
+HF_DATASETS_OFFLINE=1
+```
+
+**Re-ingest** after enabling:
+```bash
+python scripts/ingest_confluence.py --space DEV --reset
+```
+
+---
+
+### Layer 2 — BM25 Hybrid Retrieval + RRF
+
+Adds keyword recall alongside vector semantic search.  Results are merged using Reciprocal Rank Fusion (RRF).
+
+**Install**:
+```bash
+pip install rank-bm25
+```
+
+**Configure** (`.env`):
+```env
+ENABLE_BM25=true
+BM25_INDEX_PATH=data/bm25.pkl   # default
+RRF_K=60                         # default; lower = rank position matters more
+```
+
+**Re-ingest** to build the BM25 index (created alongside the Chroma store):
+```bash
+python scripts/ingest_confluence.py --space DEV
+```
+
+The BM25 index is saved to `data/bm25.pkl` and loaded lazily at first query.
+
+> **Note**: `rank_bm25` is pure Python — no network access, no ML models.  Fully air-gapped.
+
+---
+
+### Layer 3 — Cross-Encoder Reranking
+
+Reranks candidate pages using a cross-encoder model that sees (query, document) jointly — significantly more accurate than bi-encoder scoring.
+
+#### Option A — OpenAI-compatible endpoint (recommended)
+
+Use when you have an internal model server (vLLM, Infinity, or similar) serving a reranking model such as `mxbai-rerank-large-v1`.
+
+**Install**:
+```bash
+pip install httpx   # already in requirements.txt
+```
+
+**Configure** (`.env`):
+```env
+RERANKER_PROVIDER=openai_compatible
+RERANKER_BASE_URL=https://your-gateway.internal    # base URL (without /v1/rerank)
+RERANKER_API_KEY=your-api-key                      # omit if no auth required
+RERANKER_MODEL=mxbai-rerank-large-v1
+RERANKER_CANDIDATE_K=30    # pages sent to reranker
+RERANKER_TOP_N=5           # pages returned after reranking
+```
+
+> Only your internal gateway needs to be reachable — no internet access required.
+
+#### Option B — Local CrossEncoder (fully air-gapped)
+
+Use when no internal reranker API is available.  Runs the cross-encoder in-process using `sentence-transformers`.
+
+**Install**:
+```bash
+pip install sentence-transformers
+```
+
+**Download model** (do this once, on a machine with internet access, then copy to the air-gapped server):
+```bash
+# On internet-connected machine:
+pip install huggingface_hub
+huggingface-cli download mixedbread-ai/mxbai-rerank-large-v1 \
+    --local-dir models/mxbai-rerank-large-v1
+```
+
+**Configure** (`.env`):
+```env
+RERANKER_PROVIDER=local
+RERANKER_LOCAL_MODEL=models/mxbai-rerank-large-v1
+TRANSFORMERS_OFFLINE=1
+HF_DATASETS_OFFLINE=1
+RERANKER_CANDIDATE_K=30
+RERANKER_TOP_N=5
+```
+
+---
+
+### Full Stack (Maximum Accuracy)
+
+The recommended configuration for the highest retrieval accuracy in an air-gapped environment:
+
+```env
+# Chunking
+CHUNKING_STRATEGY=docling
+DOCLING_TOKENIZER_MODEL=models/all-MiniLM-L6-v2
+
+# Hybrid retrieval
+ENABLE_BM25=true
+BM25_INDEX_PATH=data/bm25.pkl
+RRF_K=60
+
+# Reranking (choose one)
+RERANKER_PROVIDER=openai_compatible
+RERANKER_BASE_URL=https://your-gateway.internal
+RERANKER_MODEL=mxbai-rerank-large-v1
+RERANKER_CANDIDATE_K=30
+RERANKER_TOP_N=5
+
+# Air-gapped
+TRANSFORMERS_OFFLINE=1
+HF_DATASETS_OFFLINE=1
+```
+
+**Ingest sequence** (first time or after configuration change):
+```bash
+pip install 'docling>=2.0.0' rank-bm25
+python scripts/ingest_confluence.py --space DEV --reset
+```
+
+---
+
+### RAG Strategy Comparison
+
+| Strategy | Recall | Precision | Latency | Dependencies |
+|---|---|---|---|---|
+| Vector only (default) | Good | Good | Fast | None |
+| + BM25 (Layer 2) | Better | Good | Fast | `rank-bm25` |
+| + Reranker (Layer 3) | Good | Best | +200–500 ms | `httpx` or `sentence-transformers` |
+| All layers | Best | Best | +200–500 ms | All of the above |
+
+> **Incremental adoption**: Each layer is independently useful.  Start with BM25 (zero query latency cost) and add reranking when precision matters most.

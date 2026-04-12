@@ -2,6 +2,7 @@
 Confluence ingestion script.
 
 Fetches Confluence pages, splits them into sections, embeds, and stores in Chroma.
+Optionally builds a BM25 keyword index for hybrid retrieval.
 
 Usage examples:
   # Ingest an entire Confluence space
@@ -16,13 +17,23 @@ Usage examples:
   # Clear the existing store and rebuild from scratch
   python scripts/ingest_confluence.py --space DEV --reset
 
+  # Use docling context-aware chunking (requires: pip install docling)
+  CHUNKING_STRATEGY=docling python scripts/ingest_confluence.py --space DEV
+
+  # Build BM25 index for hybrid retrieval (requires: pip install rank-bm25)
+  ENABLE_BM25=true python scripts/ingest_confluence.py --space DEV
+
 Environment variables (set in .env):
-  CONFLUENCE_URL    Base URL, e.g. https://confluence.your-company.com
-  CONFLUENCE_TOKEN  Personal Access Token (create in Confluence → Profile → Personal Access Tokens)
-  CHROMA_PATH       Path for the Chroma DB (default: data/chroma)
-  CHROMA_COLLECTION Collection name (default: confluence)
-  EMBEDDING_PROVIDER  local | openai  (default: local)
-  EMBEDDING_MODEL   Model name override
+  CONFLUENCE_URL       Base URL, e.g. https://confluence.your-company.com
+  CONFLUENCE_TOKEN     Personal Access Token
+  CHROMA_PATH          Path for the Chroma DB (default: data/chroma)
+  CHROMA_COLLECTION    Collection name (default: confluence)
+  EMBEDDING_PROVIDER   local | openai  (default: local)
+  EMBEDDING_MODEL      Model name override
+  CHUNKING_STRATEGY    html (default) | docling
+  DOCLING_TOKENIZER_MODEL  Local tokenizer path for docling (air-gapped)
+  ENABLE_BM25          true | false (default: false)
+  BM25_INDEX_PATH      Path to save BM25 index (default: data/bm25.pkl)
 """
 
 import argparse
@@ -42,7 +53,100 @@ import config
 from framework.core.embeddings import get_embeddings
 
 
-# ── Chunking helpers ────────────────────────────────────────────────────────────
+# ── Docling chunking ───────────────────────────────────────────────────────────
+
+def _docling_to_chunks(html: str, title: str, url: str, page_id: str) -> list[dict]:
+    """
+    Parse HTML using docling's HybridChunker for context-aware chunking.
+
+    Requires: pip install 'docling>=2.0.0'
+
+    Advantages over BeautifulSoup HTML chunking:
+    - Tables preserved as atomic units (not split mid-row)
+    - Code blocks preserved as atomic units
+    - Heading breadcrumbs embedded in every chunk for context
+    - Token-aware chunk sizing (avoids very large or very small chunks)
+
+    Air-gapped: set TRANSFORMERS_OFFLINE=1 and DOCLING_TOKENIZER_MODEL to a
+    local tokenizer path before running.  HTML input does NOT require ML models
+    for document conversion itself — only HybridChunker uses a tokenizer.
+
+    Falls back to _html_to_sections on any error so ingestion never fails silently.
+    """
+    import os
+    import tempfile
+
+    # Ensure HuggingFace libraries stay offline before any import
+    os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+    os.environ.setdefault("HF_DATASETS_OFFLINE", "1")
+
+    try:
+        from docling.document_converter import DocumentConverter
+        from docling.chunking import HybridChunker
+    except ImportError:
+        raise ImportError(
+            "docling is required for CHUNKING_STRATEGY=docling. "
+            "Run: pip install 'docling>=2.0.0'"
+        )
+
+    # Wrap bare HTML bodies so docling's HTML backend handles them correctly
+    if not html.strip().lower().startswith("<html"):
+        html = f"<html><head><title>{title}</title></head><body>{html}</body></html>"
+
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".html", delete=False, encoding="utf-8"
+    ) as f:
+        f.write(html)
+        tmp_path = f.name
+
+    try:
+        converter = DocumentConverter()
+        result = converter.convert(tmp_path)
+        dl_doc = result.document
+
+        # HybridChunker: use a local tokenizer path when set (air-gapped)
+        tokenizer_path = config.DOCLING_TOKENIZER_MODEL
+        try:
+            chunker = (
+                HybridChunker(tokenizer=tokenizer_path)
+                if tokenizer_path
+                else HybridChunker()
+            )
+        except TypeError:
+            # Older docling versions may not accept `tokenizer` kwarg
+            chunker = HybridChunker()
+
+        chunks: list[dict] = []
+        for chunk in chunker.chunk(dl_doc):
+            text = (chunk.text if hasattr(chunk, "text") else str(chunk)).strip()
+            if not text:
+                continue
+
+            # Extract section heading breadcrumb (e.g. "Intro > Setup > Install")
+            section = ""
+            meta = getattr(chunk, "meta", None)
+            if meta is not None:
+                headings = getattr(meta, "headings", None) or []
+                section = " > ".join(str(h) for h in headings if h)
+
+            chunks.append({
+                "title": title,
+                "section": section,
+                "url": url,
+                "page_id": page_id,
+                "text": text,
+            })
+
+        return chunks
+
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+
+
+# ── HTML chunking helpers ───────────────────────────────────────────────────────
 
 def _html_to_sections(html: str, title: str, url: str) -> list[dict]:
     """
@@ -178,12 +282,25 @@ def _page_to_chunks(page: dict) -> list[dict]:
     # Data Center URL format — /pages/viewpage.action?pageId=<id>
     url = f"{base_url}/pages/viewpage.action?pageId={page_id}" if page_id else base_url
     html = page.get("body", {}).get("storage", {}).get("value", "")
-    if html:
+    if not html:
+        return []
+
+    strategy = config.CHUNKING_STRATEGY.lower()
+
+    if strategy == "docling":
+        try:
+            return _docling_to_chunks(html, title, url, page_id)
+        except Exception as exc:
+            print(f"[ingest] docling chunking failed for '{title}' ({page_id}): {exc}")
+            print("[ingest] falling back to html chunking for this page")
+            chunks = _html_to_sections(html, title, url)
+    else:
         chunks = _html_to_sections(html, title, url)
-        for chunk in chunks:
-            chunk["page_id"] = page_id  # ← ADD THIS
-        return chunks
-    return []
+
+    for chunk in chunks:
+        chunk["page_id"] = page_id
+
+    return chunks
 
 
 # ── Local file helpers ──────────────────────────────────────────────────────────
@@ -191,13 +308,39 @@ def _page_to_chunks(page: dict) -> list[dict]:
 def _ingest_dir(directory: str) -> list[dict]:
     """Load all .html, .md, .txt files under a directory."""
     chunks: list[dict] = []
+    strategy = config.CHUNKING_STRATEGY.lower()
+
     for path in Path(directory).rglob("*"):
         if path.suffix.lower() in (".html", ".htm"):
-            chunks.extend(_html_to_sections(path.read_text(errors="ignore"), path.stem, str(path)))
+            html = path.read_text(errors="ignore")
+            page_id = path.stem  # use filename as page_id for local files
+            url = str(path)
+            title = path.stem
+
+            if strategy == "docling":
+                try:
+                    chunks.extend(_docling_to_chunks(html, title, url, page_id))
+                    continue
+                except Exception as exc:
+                    print(f"[ingest] docling failed for {path}: {exc}. Using html chunker.")
+
+            raw = _html_to_sections(html, title, url)
+            for c in raw:
+                c.setdefault("page_id", page_id)
+            chunks.extend(raw)
+
         elif path.suffix.lower() == ".md":
-            chunks.extend(_markdown_to_sections(path.read_text(errors="ignore"), path.stem, str(path)))
+            raw = _markdown_to_sections(path.read_text(errors="ignore"), path.stem, str(path))
+            for c in raw:
+                c.setdefault("page_id", path.stem)
+            chunks.extend(raw)
+
         elif path.suffix.lower() == ".txt":
-            chunks.extend(_plain_to_sections(path.read_text(errors="ignore"), path.stem, str(path)))
+            raw = _plain_to_sections(path.read_text(errors="ignore"), path.stem, str(path))
+            for c in raw:
+                c.setdefault("page_id", path.stem)
+            chunks.extend(raw)
+
     return chunks
 
 
@@ -288,10 +431,42 @@ def main() -> None:
         print("[ingest] no content found — nothing to store.")
         sys.exit(0)
 
-    print(f"[ingest] total chunks to embed: {len(all_chunks)}")
+    strategy = config.CHUNKING_STRATEGY.lower()
+    print(f"[ingest] total chunks to embed: {len(all_chunks)} (chunking_strategy={strategy})")
+
     store = _get_store(reset=args.reset)
     n = _upsert_chunks(store, all_chunks)
     print(f"[ingest] done — {n} chunks stored in {config.CHROMA_PATH} (collection: {config.CHROMA_COLLECTION})")
+
+    # ── BM25 index ────────────────────────────────────────────────────────────
+    if config.ENABLE_BM25:
+        print("[ingest] building BM25 index …")
+        try:
+            from framework.core.bm25_index import BM25Index, save_bm25_index
+
+            valid_chunks = [c for c in all_chunks if c.get("text", "").strip()]
+            documents = [c["text"] for c in valid_chunks]
+            metadata = [
+                {
+                    "page_id": c.get("page_id", ""),
+                    "title": c.get("title", ""),
+                    "section": c.get("section", ""),
+                    "url": c.get("url", ""),
+                }
+                for c in valid_chunks
+            ]
+
+            bm25 = BM25Index(documents, metadata)
+            save_bm25_index(bm25, config.BM25_INDEX_PATH)
+        except ImportError as exc:
+            print(
+                f"[ingest] BM25 index skipped — {exc}\n"
+                "         Install rank-bm25 to enable: pip install rank-bm25"
+            )
+        except Exception as exc:
+            print(f"[ingest] BM25 index build failed: {exc}")
+    else:
+        print("[ingest] BM25 index skipped (ENABLE_BM25=false)")
 
 
 if __name__ == "__main__":

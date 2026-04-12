@@ -80,6 +80,36 @@ EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL", "")        # provider-specif
 EMBEDDING_BASE_URL: str = os.getenv("EMBEDDING_BASE_URL", "")  # custom API endpoint for OpenAI-compatible providers
 EMBEDDING_API_KEY: str = os.getenv("EMBEDDING_API_KEY", "")    # API key if different from OPENAI_API_KEY
 
+# ── RAG improvements ───────────────────────────────────────────────────────────
+# Chunking strategy for Confluence ingestion (scripts/ingest_confluence.py):
+#   html     — BeautifulSoup heading-based sections (default, no extra deps)
+#   docling  — docling HybridChunker: context-aware, tables/code as atomic units
+CHUNKING_STRATEGY: str = os.getenv("CHUNKING_STRATEGY", "html")
+# Local tokenizer path for docling HybridChunker.  Leave empty to use docling's
+# default; set to a local model directory for air-gapped environments.
+DOCLING_TOKENIZER_MODEL: str = os.getenv("DOCLING_TOKENIZER_MODEL", "")
+
+# BM25 hybrid retrieval — adds keyword search alongside vector search.
+# Results from both are merged via Reciprocal Rank Fusion (RRF).
+# Requires: pip install rank-bm25  (build the index with ingest_confluence.py)
+ENABLE_BM25: bool = os.getenv("ENABLE_BM25", "false").lower() == "true"
+BM25_INDEX_PATH: str = os.getenv("BM25_INDEX_PATH", "data/bm25.pkl")
+RRF_K: int = int(os.getenv("RRF_K", "60"))  # RRF smoothing constant (paper default: 60)
+
+# Reranker — cross-encoder reranking of candidate pages after retrieval:
+#   none              — no reranking; use RRF/vector order as-is (default)
+#   openai_compatible — POST to RERANKER_BASE_URL/v1/rerank (httpx, no SDK dep)
+#   local             — sentence-transformers CrossEncoder (air-gapped safe)
+RERANKER_PROVIDER: str = os.getenv("RERANKER_PROVIDER", "none")
+RERANKER_BASE_URL: str = os.getenv("RERANKER_BASE_URL", "")
+RERANKER_API_KEY: str = os.getenv("RERANKER_API_KEY", "")
+RERANKER_MODEL: str = os.getenv("RERANKER_MODEL", "mxbai-rerank-large-v1")
+RERANKER_LOCAL_MODEL: str = os.getenv("RERANKER_LOCAL_MODEL", "mixedbread-ai/mxbai-rerank-large-v1")
+# Candidate pool size before reranking — more candidates = better recall, slower
+RERANKER_CANDIDATE_K: int = int(os.getenv("RERANKER_CANDIDATE_K", "30"))
+# Final number of pages returned after reranking
+RERANKER_TOP_N: int = int(os.getenv("RERANKER_TOP_N", "5"))
+
 
 # ── LLM config (llm_config.yaml) ──────────────────────────────────────────────
 

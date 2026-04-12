@@ -7,12 +7,13 @@
 1. [Framework Overview](#framework-overview)
 2. [Core Components](#core-components)
 3. [DevOps Knowledgebase Workflow (v2)](#devops-knowledgebase-workflow-v2)
-4. [Embedding and Vector Store](#embedding-and-vector-store)
-5. [Conversation History](#conversation-history)
-6. [LLM Configuration](#llm-configuration)
-7. [Checkpointing](#checkpointing)
-8. [Adding a New Workflow](#adding-a-new-workflow)
-9. [Deployment Architecture Considerations: Monolith vs Multi-Tier](#deployment-architecture-considerations-monolith-vs-multi-tier)
+4. [RAG Improvement Stack](#rag-improvement-stack)
+5. [Embedding and Vector Store](#embedding-and-vector-store)
+6. [Conversation History](#conversation-history)
+7. [LLM Configuration](#llm-configuration)
+8. [Checkpointing](#checkpointing)
+9. [Adding a New Workflow](#adding-a-new-workflow)
+10. [Deployment Architecture Considerations: Monolith vs Multi-Tier](#deployment-architecture-considerations-monolith-vs-multi-tier)
 
 ---
 
@@ -202,6 +203,148 @@ After the first answer, the fetched page content lives in conversation history a
 Follow-up Q&A is instant (zero Confluence API calls, zero vector search calls) and accurate (working from the exact same pages as the initial answer).
 
 **Edge case — follow-up about a compressed section**: If the user asks about a section that was shown as heading-only, the answer agent flags this and invites the user to ask specifically. A future enhancement could add a `re_fetch_section` tool that fetches the full page again with a targeted section query.
+
+---
+
+## RAG Improvement Stack
+
+The RAG pipeline can be progressively enhanced by enabling three optional layers on top of the base vector search. Each layer is independently toggled via environment variables and is fully air-gapped safe.
+
+### Full Stack Diagram
+
+```
+INGESTION  (scripts/ingest_confluence.py)
+─────────────────────────────────────────────────────────────────────────────
+  Confluence API / Local files
+          │
+          ▼
+  ┌─────────────────────────────────────────────────────────┐
+  │  CHUNKING STRATEGY  (CHUNKING_STRATEGY=html|docling)     │
+  │                                                          │
+  │  html (default)          docling                         │
+  │  ─────────────           ─────────────────────────────   │
+  │  BeautifulSoup           docling HybridChunker           │
+  │  heading-based           • Tables → atomic unit          │
+  │  sections                • Code   → atomic unit          │
+  │                          • Heading breadcrumbs in text   │
+  │                          • Token-aware chunk sizing      │
+  └────────────────────────────┬────────────────────────────┘
+                               │ chunks (text + metadata)
+              ┌────────────────┴────────────────┐
+              ▼                                 ▼
+     Chroma vector store              BM25 index (data/bm25.pkl)
+     (embed + persist)                (ENABLE_BM25=true)
+     always built                     rank-bm25, pure Python
+
+
+RETRIEVAL  (tools/confluence.py → find_confluence_page_ids)
+─────────────────────────────────────────────────────────────────────────────
+  User query
+      │
+      ├─────────────────────────────────────────────┐
+      │                                             │
+      ▼                                             ▼
+  Vector search                            BM25 keyword search
+  (Chroma cosine similarity)               (ENABLE_BM25=true)
+  always active                            rank_bm25.BM25Okapi
+      │                                             │
+      │  ranked page_id list                        │  ranked page_id list
+      └──────────────────────┬──────────────────────┘
+                             │
+                             ▼
+                    ┌─────────────────┐
+                    │   RRF MERGE     │  (ENABLE_BM25=true)
+                    │  Reciprocal     │  score(page) = Σ 1/(k + rank)
+                    │  Rank Fusion    │  k = RRF_K (default 60)
+                    └────────┬────────┘
+                             │ merged page_id list (up to RERANKER_CANDIDATE_K)
+                             ▼
+                    ┌─────────────────────────────────────────┐
+                    │          RERANKER                        │
+                    │  RERANKER_PROVIDER=                      │
+                    │                                          │
+                    │  none (default)                          │
+                    │    pass-through, keep RRF order          │
+                    │                                          │
+                    │  openai_compatible                       │
+                    │    POST /v1/rerank (httpx, no SDK)       │
+                    │    model: mxbai-rerank-large-v1          │
+                    │                                          │
+                    │  local                                   │
+                    │    sentence-transformers CrossEncoder     │
+                    │    air-gapped: model from models/ dir    │
+                    └────────┬────────────────────────────────┘
+                             │ top RERANKER_TOP_N page IDs
+                             ▼
+                    page_fetcher_agent
+                    (fetch full pages → compress → answer)
+```
+
+### Layer-by-Layer Explanation
+
+#### Layer 1 — Context-Aware Chunking (Docling)
+
+**Problem with default HTML chunking**: BeautifulSoup splits pages at heading boundaries. A table row spanning multiple `<tr>` elements may be split into separate chunks, breaking its meaning. Same for multi-line code blocks.
+
+**Docling solution**: `HybridChunker` treats tables and code as atomic units that are never split. Every chunk carries heading breadcrumbs (e.g. "Installation > Prerequisites > Python Setup") so the embedding captures the full hierarchical context, not just the local paragraph text. Chunk sizes are token-aware, avoiding the very-small and very-large extremes that hurt retrieval quality.
+
+**Air-gapped configuration**: Docling's HTML backend requires no ML models for document conversion. `HybridChunker` uses a tokenizer (for token counting). Set `DOCLING_TOKENIZER_MODEL` to a local path to avoid any network access.
+
+**Design decision — docling off by default**: Docling adds a dependency and slightly longer ingestion time. The default `html` strategy is sufficient for most pages. Enable `docling` when you have pages with complex tables or code-heavy documentation.
+
+#### Layer 2 — BM25 Hybrid Retrieval + RRF
+
+**Problem with vector-only search**: Dense embeddings capture semantic similarity but can miss exact keyword matches. A query for "JENKINS_HOME variable" may rank a page about "setting environment variables" lower than a page about "Jenkins overview" because the embedding of the longer phrase is more diffuse.
+
+**BM25 solution**: BM25 (Best Match 25) is a classical keyword ranking function that scores documents by term frequency and inverse document frequency. It excels at exact keyword recall.
+
+**Reciprocal Rank Fusion**: Rather than normalising or weighting raw scores from two different distributions (cosine similarity vs. BM25 scores), RRF works purely on *rank positions*. Score = Σ 1/(k + rank), where k=60 dampens the impact of top-1 vs top-2 rank differences. This makes the merge robust without tuning.
+
+**BM25 operates at page level**: Both vector and BM25 searches group their chunk hits by `page_id` to produce ranked page lists. RRF merges those page-level lists. This is consistent with the RAG-as-index design: chunks are search indices, not answer sources.
+
+**Air-gapped**: `rank_bm25` is pure Python — no network dependency, no ML models.
+
+**Design decision — BM25 off by default**: BM25 requires building and persisting a separate index file (`data/bm25.pkl`). Existing deployments are unaffected. Enable it by setting `ENABLE_BM25=true` and re-running the ingest script.
+
+#### Layer 3 — Cross-Encoder Reranking
+
+**Problem with bi-encoder retrieval**: Vector embeddings and BM25 both score documents independently of each other. A cross-encoder sees the (query, document) pair together and can capture fine-grained semantic alignment that bi-encoders miss.
+
+**Two provider options**:
+
+| Provider | How it runs | Good for |
+|---|---|---|
+| `openai_compatible` | POST to internal `/v1/rerank` endpoint via httpx | Company-hosted mxbai-rerank-large-v1, Infinity, vLLM |
+| `local` | sentence-transformers CrossEncoder in-process | Fully air-gapped; model in `models/` directory |
+
+**Two-stage retrieval**: The reranker is expensive (O(n × query_length) cross-attention). The pipeline first collects `RERANKER_CANDIDATE_K` candidate pages cheaply via vector+BM25, then passes their best-matching chunk texts to the reranker. Only `RERANKER_TOP_N` pages are returned after reranking.
+
+**Design decision — reranker text = best chunk, not full page**: The reranker scores (query, document) pairs where each document is the top-scoring chunk for that page. This is significantly faster than reranking against full compressed pages, and the best chunk is the most relevant snippet the page has to offer anyway.
+
+**Design decision — failures are non-fatal**: If the reranker endpoint is unreachable, the pipeline logs a warning and falls back to vector/RRF ordering. The answer agent still gets useful pages — reranking is a quality improvement, not a requirement.
+
+**Air-gapped**:
+- `openai_compatible`: only needs your internal gateway reachable (not the internet)
+- `local`: set `TRANSFORMERS_OFFLINE=1` and `RERANKER_LOCAL_MODEL=models/<model-dir>`. Uses `sentence-transformers` CrossEncoder with a locally downloaded model.
+
+### Full Stack Recommendation
+
+For the highest accuracy retrieval in an air-gapped environment:
+
+```
+CHUNKING_STRATEGY=docling
+ENABLE_BM25=true
+RERANKER_PROVIDER=openai_compatible   # or: local
+RERANKER_BASE_URL=https://your-gateway.internal
+RERANKER_MODEL=mxbai-rerank-large-v1
+RERANKER_CANDIDATE_K=30
+RERANKER_TOP_N=5
+```
+
+Incremental adoption — each layer is independently useful:
+- **BM25 alone** improves recall with no latency cost at query time
+- **Reranker alone** on vector results already gives a meaningful precision boost
+- **All three** gives the highest quality at the cost of ingestion time (docling) and query latency (reranker API call)
 
 ---
 

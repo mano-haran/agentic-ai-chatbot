@@ -242,16 +242,121 @@ def _compress_page_content(sections: list[dict], query: str, max_chars: int = 80
 
 # ── Tool: find_confluence_page_ids ────────────────────────────────────────────
 
+def _extract_page_id(meta: dict) -> str:
+    """Extract page_id from chunk metadata — explicit field or parsed from URL."""
+    page_id = meta.get("page_id", "")
+    if not page_id:
+        url = meta.get("url", "")
+        m = re.search(r"pageId=(\d+)", url)
+        if m:
+            page_id = m.group(1)
+    return page_id
+
+
+def _vector_search_pages(query: str, candidate_k: int) -> tuple[list[str], dict[str, dict]]:
+    """
+    Run vector similarity search and group results by page_id.
+
+    Returns:
+        ranked_page_ids: page IDs sorted by best chunk score descending.
+        page_map:        dict mapping page_id → page info (title, url, best_score,
+                         best_chunk_text, matched_sections).
+    """
+    from langchain_core.documents import Document
+
+    store = _get_store()
+    results: list[tuple[Document, float]] = store.similarity_search_with_relevance_scores(
+        query, k=candidate_k
+    )
+
+    page_map: dict[str, dict] = {}
+
+    for doc, score in results:
+        if score < _RELEVANCE_THRESHOLD:
+            continue
+
+        meta = doc.metadata
+        page_id = _extract_page_id(meta)
+        if not page_id:
+            continue
+
+        section = meta.get("section", "")
+        title = meta.get("title", "Unknown")
+        url = meta.get("url", "")
+
+        if page_id not in page_map:
+            page_map[page_id] = {
+                "title": title,
+                "url": url,
+                "best_score": score,
+                "best_chunk_text": doc.page_content,
+                "matched_sections": [],
+            }
+        else:
+            if score > page_map[page_id]["best_score"]:
+                page_map[page_id]["best_score"] = score
+                page_map[page_id]["best_chunk_text"] = doc.page_content
+
+        if section and section not in page_map[page_id]["matched_sections"]:
+            if len(page_map[page_id]["matched_sections"]) < 5:
+                page_map[page_id]["matched_sections"].append(section)
+
+    ranked = sorted(page_map.keys(), key=lambda p: page_map[p]["best_score"], reverse=True)
+    return ranked, page_map
+
+
+def _bm25_search_pages(query: str, candidate_k: int, page_map: dict[str, dict]) -> list[str]:
+    """
+    Run BM25 keyword search and group results by page_id.
+
+    Augments page_map in-place with metadata for pages not already present
+    (pages found only by BM25, not by vector search).
+
+    Returns:
+        ranked_page_ids: page IDs sorted by best BM25 chunk score descending.
+    """
+    from framework.core.bm25_index import get_bm25_index
+
+    index = get_bm25_index()
+    if index is None:
+        return []
+
+    hits = index.search(query, top_k=candidate_k)
+    page_scores: dict[str, float] = {}
+
+    for doc_idx, score in hits:
+        meta = index.get_metadata(doc_idx)
+        page_id = meta.get("page_id", "")
+        if not page_id:
+            continue
+
+        if page_id not in page_scores or score > page_scores[page_id]:
+            page_scores[page_id] = score
+
+        # Add to page_map if not yet present (BM25-only hit)
+        if page_id not in page_map:
+            page_map[page_id] = {
+                "title": meta.get("title", "Unknown"),
+                "url": meta.get("url", ""),
+                "best_score": score,
+                "best_chunk_text": index.get_document(doc_idx),
+                "matched_sections": [meta.get("section", "")] if meta.get("section") else [],
+            }
+
+    return sorted(page_scores.keys(), key=lambda p: page_scores[p], reverse=True)
+
+
 def find_confluence_page_ids(query: str, top_k: int = 5) -> str:
     """
     Search the Chroma knowledge base for Confluence pages relevant to the query.
 
-    Uses vector similarity search to identify which pages contain content
-    matching the query. Returns page IDs, titles, relevance scores, and the
-    section names that matched — NOT the chunk text itself.
+    Retrieval pipeline (layers enabled via env vars):
+      1. Vector similarity search (always active)
+      2. BM25 keyword search + RRF merge  (ENABLE_BM25=true)
+      3. Cross-encoder reranking          (RERANKER_PROVIDER != none)
 
-    The page IDs returned should be passed to fetch_page_by_id to retrieve
-    full page content for answering the user's question.
+    Returns page IDs, titles, relevance scores, and matched section names —
+    NOT the chunk text itself.  Pass the returned page IDs to fetch_page_by_id.
 
     Args:
         query:  Natural-language question or search phrase.
@@ -262,85 +367,79 @@ def find_confluence_page_ids(query: str, top_k: int = 5) -> str:
         the relevance threshold, with a suggestion to use fetch_confluence_page.
     """
     try:
-        store = _get_store()
+        store = _get_store()  # noqa: F841 — validates store is accessible
     except Exception as exc:
         return (
             f"[find_confluence_page_ids] Vector store unavailable: {exc}\n"
             "Run scripts/ingest_confluence.py to populate the knowledge base."
         )
 
+    # Determine candidate pool size — fetch more when reranker will narrow it down
+    candidate_k = (
+        config.RERANKER_CANDIDATE_K
+        if config.RERANKER_PROVIDER.lower() != "none"
+        else top_k * 6
+    )
+    # Always fetch at least top_k * 4 vector candidates for adequate recall
+    vector_fetch_k = max(candidate_k * 4, top_k * 4)
+
     try:
-        from langchain_core.documents import Document
-        results: list[tuple[Document, float]] = store.similarity_search_with_relevance_scores(
-            query, k=top_k * 4
-        )
+        vector_ranked, page_map = _vector_search_pages(query, vector_fetch_k)
     except Exception as exc:
-        return f"[find_confluence_page_ids] Search failed: {exc}"
+        return f"[find_confluence_page_ids] Vector search failed: {exc}"
 
-    # Filter by relevance threshold
-    relevant = [(doc, score) for doc, score in results if score >= _RELEVANCE_THRESHOLD]
+    # ── BM25 + RRF ────────────────────────────────────────────────────────────
+    if config.ENABLE_BM25:
+        try:
+            bm25_ranked = _bm25_search_pages(query, vector_fetch_k, page_map)
+        except Exception as exc:
+            print(f"[confluence] BM25 search failed: {exc}. Using vector-only ranking.")
+            bm25_ranked = []
 
-    if not relevant:
+        if bm25_ranked:
+            from framework.core.bm25_index import rrf_merge
+            merged = rrf_merge([vector_ranked, bm25_ranked], k=config.RRF_K)
+        else:
+            merged = vector_ranked
+    else:
+        merged = vector_ranked
+
+    if not merged:
         return (
-            f"[NO PAGES FOUND] No relevant pages found in the vector store for: '{query}'\n"
+            f"[NO PAGES FOUND] No relevant pages found in the knowledge base for: '{query}'\n"
             "Suggestion: call fetch_confluence_page with the same query to search "
             "Confluence directly via CQL."
         )
 
-    # Group by page_id
-    page_map: dict[str, dict] = {}
+    # ── Reranker ──────────────────────────────────────────────────────────────
+    if config.RERANKER_PROVIDER.lower() != "none":
+        candidates = merged[:candidate_k]
+        doc_texts = [page_map[p]["best_chunk_text"] for p in candidates]
+        try:
+            from framework.core.reranker import get_reranker
+            reranker = get_reranker()
+            reranked_indices = reranker.rerank(query, doc_texts, top_n=top_k)
+            top_pages = [candidates[i] for i in reranked_indices]
+        except Exception as exc:
+            print(f"[confluence] Reranker failed: {exc}. Falling back to RRF/vector ranking.")
+            top_pages = candidates[:top_k]
+    else:
+        top_pages = merged[:top_k]
 
-    for doc, score in relevant:
-        meta = doc.metadata
-
-        # Extract page_id from metadata or parse from URL
-        page_id = meta.get("page_id", "")
-        if not page_id:
-            url = meta.get("url", "")
-            m = re.search(r"pageId=(\d+)", url)
-            if m:
-                page_id = m.group(1)
-
-        if not page_id:
-            continue  # skip results with no identifiable page_id
-
-        section = meta.get("section", "")
-        title = meta.get("title", "Unknown")
-        url = meta.get("url", "")
-
-        if page_id not in page_map:
-            page_map[page_id] = {
-                "page_id": page_id,
-                "title": title,
-                "url": url,
-                "best_score": score,
-                "matched_sections": [],
-            }
-        else:
-            if score > page_map[page_id]["best_score"]:
-                page_map[page_id]["best_score"] = score
-
-        if section and section not in page_map[page_id]["matched_sections"]:
-            if len(page_map[page_id]["matched_sections"]) < 5:
-                page_map[page_id]["matched_sections"].append(section)
-
-    if not page_map:
+    if not top_pages:
         return (
             f"[NO PAGES FOUND] Chunks were found but none had a resolvable page ID "
             f"for query: '{query}'\n"
             "Suggestion: call fetch_confluence_page with the same query."
         )
 
-    # Sort by best_score descending, return top_k
-    sorted_pages = sorted(page_map.values(), key=lambda p: p["best_score"], reverse=True)
-    top_pages = sorted_pages[:top_k]
-
     lines = ["PAGE_RESULTS:"]
-    for p in top_pages:
-        sections_label = ", ".join(p["matched_sections"]) if p["matched_sections"] else ""
+    for pid in top_pages:
+        info = page_map[pid]
+        sections_label = ", ".join(info["matched_sections"]) if info["matched_sections"] else ""
         lines.append(
-            f'page_id={p["page_id"]} | title="{p["title"]}" | '
-            f'score={p["best_score"]:.2f} | matched_sections=[{sections_label}]'
+            f'page_id={pid} | title="{info["title"]}" | '
+            f'score={info["best_score"]:.2f} | matched_sections=[{sections_label}]'
         )
 
     return "\n".join(lines)
