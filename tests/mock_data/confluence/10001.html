@@ -1,0 +1,100 @@
+<html>
+<head><title>Developer Onboarding Guide</title></head>
+<body>
+<h1>Developer Onboarding Guide</h1>
+<p>Welcome to the engineering team! This guide walks you through everything you need to be productive in your first week. Follow the steps in order — each section builds on the previous one. If you get stuck, ping the #dev-onboarding Slack channel.</p>
+
+<h2>Account Setup</h2>
+<p>Before you can access any system, IT needs to provision your accounts. Submit a ticket to IT via the Service Desk portal within your first hour. Include your full name, start date, team (Engineering), and manager's name.</p>
+<h3>Required Accounts</h3>
+<ul>
+<li><strong>GitHub Enterprise</strong> — Request access to the acme-corp organisation. You need to be added to the engineering team by your manager. Two-factor authentication is mandatory; use an authenticator app, not SMS.</li>
+<li><strong>JIRA</strong> — Your manager will add you to the relevant project boards. Default role is Developer. If you need admin access for a project, raise a request.</li>
+<li><strong>Confluence</strong> — Access is granted automatically once your corporate account is created. You can view all spaces but only edit spaces you are a member of.</li>
+<li><strong>Slack</strong> — Download the desktop app and the mobile app. Join: #general, #engineering, #dev-onboarding, #incidents, and your team channel (ask your manager).</li>
+<li><strong>Datadog</strong> — Request read-only access via IT. If you need to create monitors or dashboards, request the Developer role.</li>
+<li><strong>AWS Console</strong> — Read-only access to the dev and staging accounts is granted by default. Production access requires a separate approval from your VP Engineering.</li>
+</ul>
+
+<h2>Development Environment Setup</h2>
+<p>We standardise on macOS for development. If you received a Windows machine, raise a hardware swap request with IT immediately — our tooling is not tested on Windows.</p>
+<h3>Required Tools</h3>
+<p>Install the following in order. Each tool has a minimum version requirement enforced by our CI pipeline — installing an older version will cause build failures.</p>
+<ul>
+<li><strong>Homebrew</strong> — Package manager. Install from brew.sh. All other tools are installed via Homebrew.</li>
+<li><strong>Java 17 (Temurin)</strong> — <code>brew install --cask temurin17</code>. We use Temurin (Eclipse Adoptium), not Oracle JDK. Set JAVA_HOME in your shell profile.</li>
+<li><strong>Maven 3.9+</strong> — <code>brew install maven</code>. Run <code>mvn -version</code> to verify.</li>
+<li><strong>Docker Desktop</strong> — Download from docker.com. Required for running local services. Allocate at least 8 GB RAM and 4 CPUs in Docker Desktop preferences.</li>
+<li><strong>kubectl</strong> — <code>brew install kubectl</code>. Configure with our cluster credentials (see Kubernetes Access guide).</li>
+<li><strong>IntelliJ IDEA Ultimate</strong> — Licences are managed via IT. Request a licence seat before installing. Community edition is not recommended as it lacks Spring Boot support.</li>
+<li><strong>AWS CLI v2</strong> — <code>brew install awscli</code>. Configure with your SSO profile: <code>aws configure sso</code>.</li>
+</ul>
+<h3>Shell Configuration</h3>
+<p>Add the following to your <code>~/.zshrc</code> (or <code>~/.bashrc</code> if you use bash):</p>
+<pre>
+export JAVA_HOME=$(/usr/libexec/java_home -v 17)
+export PATH="$JAVA_HOME/bin:$PATH"
+export MAVEN_OPTS="-Xmx2g -XX:+TieredCompilation"
+</pre>
+<p>Run <code>source ~/.zshrc</code> after saving. Verify with <code>java -version</code> — it should report OpenJDK 17.</p>
+
+<h2>Repository Access and Structure</h2>
+<p>All source code is on GitHub Enterprise at github.acme.com. Clone repositories using SSH, not HTTPS — HTTPS tokens expire and break CI. Add your SSH public key to your GitHub profile under Settings → SSH and GPG keys.</p>
+<h3>Core Repositories</h3>
+<ul>
+<li><strong>acme/MyApp</strong> — Main backend service (Spring Boot, Java). This is the primary repo most developers work in.</li>
+<li><strong>acme/frontend</strong> — React frontend. Separate repo with its own CI pipeline.</li>
+<li><strong>acme/infra</strong> — Terraform infrastructure code. Read-only for most developers; write access requires infrastructure team approval.</li>
+<li><strong>acme/shared-libs</strong> — Internal Java libraries published to our Nexus artifact server. Changes here affect all downstream services.</li>
+<li><strong>acme/jenkins-pipelines</strong> — Shared Jenkins pipeline library. Jenkinsfiles in application repos reference this.</li>
+</ul>
+<h3>Branch Strategy</h3>
+<p>We use trunk-based development with short-lived feature branches. Branch naming convention: <code>feature/JIRA-ticket-short-description</code> or <code>fix/JIRA-ticket-description</code>. Branch lifetimes should not exceed 2 days. Long-running branches lead to integration hell.</p>
+<p>Protected branches: <code>main</code> and <code>release/*</code>. Direct pushes are blocked. All changes go through Pull Requests with at least 2 approvals.</p>
+
+<h2>Local Development Workflow</h2>
+<p>Before running the application locally, you need to start the dependent services using Docker Compose. The compose file is in the repository root.</p>
+<pre>
+# Start all dependencies (PostgreSQL, Redis, Kafka, localstack)
+docker compose up -d
+
+# Build the application
+mvn clean package -DskipTests
+
+# Run with local profile
+mvn spring-boot:run -Dspring-boot.run.profiles=local
+</pre>
+<p>The application starts on port 8080. The health endpoint is at <code>http://localhost:8080/actuator/health</code>. If it returns 200, you are good.</p>
+<h3>Running Tests</h3>
+<p>Unit tests: <code>mvn test</code> — runs in approximately 2 minutes. Integration tests: <code>mvn verify -P integration-tests</code> — requires Docker Compose services to be running; takes 8–12 minutes. Do not skip unit tests when submitting a PR.</p>
+
+<h2>First Week Checklist</h2>
+<p>Use this checklist to track your onboarding progress. Share your completed checklist with your manager at your end-of-week 1:1.</p>
+<ul>
+<li>IT accounts provisioned (GitHub, JIRA, Confluence, Slack, Datadog, AWS)</li>
+<li>Dev environment set up (Java 17, Maven, Docker, IntelliJ)</li>
+<li>SSH key added to GitHub</li>
+<li>Cloned acme/MyApp and built successfully</li>
+<li>Run unit tests locally — all passing</li>
+<li>Read the Architecture Decision Records (ADRs) in Confluence → Engineering → ADRs</li>
+<li>Joined all required Slack channels</li>
+<li>Read the Code Review Guidelines (this wiki)</li>
+<li>Read the Production Deployment Process (this wiki)</li>
+<li>Attended team standup (daily, 9:30 AM)</li>
+<li>1:1 with manager scheduled</li>
+<li>First JIRA ticket assigned and in progress</li>
+</ul>
+
+<h2>Useful Resources</h2>
+<p>Bookmark these links — you will use them daily.</p>
+<ul>
+<li>Jenkins CI: https://jenkins.acme.com — build status, logs</li>
+<li>JIRA: https://jira.acme.com — tickets, sprints, roadmap</li>
+<li>Confluence: https://confluence.acme.com — this wiki</li>
+<li>Datadog: https://app.datadoghq.com — metrics, logs, APM</li>
+<li>Nexus: https://nexus.acme.com — internal Maven artefacts</li>
+<li>AWS Console: https://acme.awsapps.com/start — SSO entry point</li>
+</ul>
+<p>For anything not covered here, ask in #dev-onboarding. The team is friendly and the question is never stupid.</p>
+</body>
+</html>

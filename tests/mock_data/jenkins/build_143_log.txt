@@ -1,0 +1,72 @@
+Started by GitHub push by sarah.chen
+[Pipeline] Start of Pipeline
+[Pipeline] node
+Running on jenkins-agent-02 in /workspace/MyApp
+[Pipeline] {
+[Pipeline] stage
+[Pipeline] { (Checkout)
+Cloning repository https://github.com/acme/MyApp.git
+ > git checkout main
+Commit message: "Add integration tests for payment gateway"
+[Pipeline] }
+
+[Pipeline] stage
+[Pipeline] { (Build)
+[Pipeline] sh
++ mvn clean package -DskipTests=true -B
+[INFO] Building MyApp 2.4.2-SNAPSHOT
+[INFO] BUILD SUCCESS
+[INFO] Total time:  34.12 s
+[Pipeline] }
+
+[Pipeline] stage
+[Pipeline] { (Test)
+[Pipeline] sh
++ mvn test -B
+[INFO] Scanning for projects...
+[INFO] Building MyApp 2.4.2-SNAPSHOT
+[INFO]
+[INFO] --- maven-surefire-plugin:3.1.2:test (default-test) ---
+[INFO] Using auto detected provider org.apache.maven.surefire.junitplatform.JUnitPlatformProvider
+[INFO]
+[INFO] -------------------------------------------------------
+[INFO]  T E S T S
+[INFO] -------------------------------------------------------
+[INFO] Running com.acme.service.PaymentServiceTest
+[INFO] Tests run: 12, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 2.341 s
+[INFO] Running com.acme.service.UserServiceTest
+[ERROR] Tests run: 8, Failures: 2, Errors: 0, Skipped: 0, Time elapsed: 4.872 s <<< FAILURE!
+[ERROR] testCreateUserSendsWelcomeEmail(com.acme.service.UserServiceTest) <<< FAILURE!
+        AssertionError: Email notification was not sent
+        Expected: <true>
+         but was: <false>
+        at com.acme.service.UserServiceTest.testCreateUserSendsWelcomeEmail(UserServiceTest.java:94)
+[ERROR] testUpdateUserProfileTriggersAuditLog(com.acme.service.UserServiceTest) <<< FAILURE!
+        AssertionError: Audit log entry missing for event type USER_PROFILE_UPDATE
+        Expected: 1 audit entry
+         but was: 0 audit entries
+        at com.acme.service.UserServiceTest.testUpdateUserProfileTriggersAuditLog(UserServiceTest.java:147)
+[INFO] Running com.acme.repository.OrderRepositoryTest
+[INFO] Tests run: 15, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 1.234 s
+[INFO] Running com.acme.integration.PaymentGatewayIntegrationTest
+[INFO] Tests run: 6, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 8.901 s
+[INFO]
+[INFO] Results:
+[INFO]
+[ERROR] Failures:
+[ERROR]   UserServiceTest.testCreateUserSendsWelcomeEmail:94 AssertionError: Email notification was not sent
+[ERROR]   UserServiceTest.testUpdateUserProfileTriggersAuditLog:147 AssertionError: Audit log entry missing for event type USER_PROFILE_UPDATE
+[INFO]
+[ERROR] Tests run: 41, Failures: 2, Errors: 0, Skipped: 0
+[INFO]
+[INFO] ------------------------------------------------------------------
+[INFO] BUILD FAILURE
+[INFO] ------------------------------------------------------------------
+[INFO] Total time:  1:38.54 s
+[INFO] Finished at: 2024-01-16T09:17:27Z
+[INFO] ------------------------------------------------------------------
+[ERROR] Failed to execute goal org.apache.maven.plugins:maven-surefire-plugin:3.1.2:test
+        (default-test) on project MyApp: There are test failures.
+[Pipeline] }
+[Pipeline] End of Pipeline
+Finished: FAILURE

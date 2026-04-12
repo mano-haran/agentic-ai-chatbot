@@ -1,0 +1,40 @@
+{
+  "job_url": "http://mock-jenkins/job/MyApp/",
+  "builds": [
+    {
+      "number": 143,
+      "result": "FAILURE",
+      "duration": 98540,
+      "timestamp": 1705402247000,
+      "url": "http://mock-jenkins/job/MyApp/143/"
+    },
+    {
+      "number": 142,
+      "result": "FAILURE",
+      "duration": 12847,
+      "timestamp": 1705315847000,
+      "url": "http://mock-jenkins/job/MyApp/142/"
+    },
+    {
+      "number": 141,
+      "result": "SUCCESS",
+      "duration": 165340,
+      "timestamp": 1705310400000,
+      "url": "http://mock-jenkins/job/MyApp/141/"
+    },
+    {
+      "number": 140,
+      "result": "SUCCESS",
+      "duration": 170210,
+      "timestamp": 1705247100000,
+      "url": "http://mock-jenkins/job/MyApp/140/"
+    },
+    {
+      "number": 139,
+      "result": "SUCCESS",
+      "duration": 162880,
+      "timestamp": 1705183700000,
+      "url": "http://mock-jenkins/job/MyApp/139/"
+    }
+  ]
+}

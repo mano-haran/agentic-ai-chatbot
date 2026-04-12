@@ -80,6 +80,17 @@ EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL", "")        # provider-specif
 EMBEDDING_BASE_URL: str = os.getenv("EMBEDDING_BASE_URL", "")  # custom API endpoint for OpenAI-compatible providers
 EMBEDDING_API_KEY: str = os.getenv("EMBEDDING_API_KEY", "")    # API key if different from OPENAI_API_KEY
 
+# ── Testing / mock mode ────────────────────────────────────────────────────────
+# Set MOCK_JENKINS=true to make Jenkins tools read from tests/mock_data/jenkins/
+# instead of calling a real Jenkins server.  No Jenkins server needed.
+MOCK_JENKINS: bool = os.getenv("MOCK_JENKINS", "false").lower() == "true"
+# Set MOCK_CONFLUENCE=true to make fetch_page_by_id and fetch_confluence_page
+# read from tests/mock_data/confluence/ instead of calling the Confluence API.
+# find_confluence_page_ids still queries Chroma — run ingest first (see README).
+MOCK_CONFLUENCE: bool = os.getenv("MOCK_CONFLUENCE", "false").lower() == "true"
+# Base directory for all mock data files (relative to project root or absolute).
+MOCK_DATA_DIR: str = os.getenv("MOCK_DATA_DIR", "tests/mock_data")
+
 # ── RAG improvements ───────────────────────────────────────────────────────────
 # Chunking strategy for Confluence ingestion (scripts/ingest_confluence.py):
 #   html     — BeautifulSoup heading-based sections (default, no extra deps)

@@ -27,8 +27,97 @@ from __future__ import annotations
 
 import re
 from functools import lru_cache
+from pathlib import Path
 
 import config
+
+
+# ── Mock mode helpers ──────────────────────────────────────────────────────────
+
+def _mock_confluence_dir() -> Path:
+    return Path(config.MOCK_DATA_DIR) / "confluence"
+
+
+def _mock_fetch_page_by_id(page_id: str, query: str) -> str:
+    """
+    Read a mock page from tests/mock_data/confluence/<page_id>.html and apply
+    the same parsing and compression logic as the real fetch_page_by_id.
+    """
+    d = _mock_confluence_dir()
+    path = d / f"{page_id}.html"
+    if not path.exists():
+        return (
+            f"[MOCK] Page {page_id} not found.\n"
+            f"Create {path} to add a mock page for this page ID."
+        )
+
+    html = path.read_text(encoding="utf-8")
+    # Extract title from <title> tag or fall back to page_id
+    title_m = re.search(r"<title>([^<]+)</title>", html, re.IGNORECASE)
+    title = title_m.group(1).strip() if title_m else f"Page {page_id}"
+    url = f"file://{path.resolve()}"
+
+    sections = _parse_html_sections(html)
+    raw_text_len = sum(len(s["content"]) for s in sections)
+
+    if raw_text_len <= _FULL_PAGE_THRESHOLD or not query:
+        full = _html_to_text(html)
+        return f"**{title}**\nURL: {url}\n\n{full}"
+    else:
+        compressed = _compress_page_content(sections, query, max_chars=8000)
+        return (
+            f"**{title}**\nURL: {url}\n\n"
+            "[Content compressed — query-guided section extraction applied]\n\n"
+            f"{compressed}"
+        )
+
+
+def _mock_fetch_confluence_page(query: str) -> str:
+    """
+    Simple keyword search across mock HTML files — returns up to 2 best matches.
+    Used as the CQL fallback when MOCK_CONFLUENCE=true.
+    """
+    d = _mock_confluence_dir()
+    if not d.exists():
+        return (
+            f"[MOCK] Mock Confluence directory not found: {d}\n"
+            "Create tests/mock_data/confluence/ with .html files."
+        )
+
+    query_terms = set(re.findall(r"\w+", query.lower())) - {
+        "the", "a", "an", "is", "are", "how", "what", "where", "to", "for",
+        "of", "in", "do", "i", "my", "can", "get", "set", "use", "with"
+    }
+
+    scored: list[tuple[float, Path, str]] = []
+    for path in sorted(d.glob("*.html")):
+        html = path.read_text(encoding="utf-8", errors="ignore")
+        text = _html_to_text(html).lower()
+        title_m = re.search(r"<title>([^<]+)</title>", html, re.IGNORECASE)
+        title = title_m.group(1).strip() if title_m else path.stem
+        score = sum(1 for t in query_terms if t in text) / max(len(query_terms), 1)
+        if score > 0:
+            scored.append((score, path, title))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+
+    if not scored:
+        return (
+            f"[MOCK] No matching pages found for: '{query}'\n"
+            "The mock knowledge base may not contain information on this topic."
+        )
+
+    parts: list[str] = []
+    for _, path, title in scored[:2]:
+        html = path.read_text(encoding="utf-8", errors="ignore")
+        text = _html_to_text(html)
+        page_id = path.stem
+        url = f"file://{path.resolve()}"
+        if len(text) > 4000:
+            text = text[:4000] + "\n...[content truncated]"
+        parts.append(f"**{title}**\nURL: {url}\n\n{text}")
+
+    return "\n\n---\n\n".join(parts)
 
 # Minimum cosine-similarity score to include a result in page lookups.
 _RELEVANCE_THRESHOLD = 0.20
@@ -467,6 +556,9 @@ def fetch_page_by_id(page_id: str, query: str = "") -> str:
     Returns:
         Formatted string: title, URL, optional compression notice, content.
     """
+    if config.MOCK_CONFLUENCE:
+        return _mock_fetch_page_by_id(page_id, query)
+
     try:
         from atlassian import Confluence
     except ImportError:
@@ -536,6 +628,9 @@ def fetch_confluence_page(query: str) -> str:
         each prefixed with the page title and its exact URL.
         Returns an error message if Confluence is unreachable or no pages match.
     """
+    if config.MOCK_CONFLUENCE:
+        return _mock_fetch_confluence_page(query)
+
     try:
         from atlassian import Confluence
     except ImportError:

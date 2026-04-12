@@ -20,10 +20,71 @@ to the last LOG_TAIL_LINES lines so the LLM context is not flooded.
 
 import os
 import json
+import re
+from pathlib import Path
+
 import requests
+import config
 from framework.tools.decorators import tool
 
 LOG_TAIL_LINES = 200
+
+
+# ── Mock mode helpers ──────────────────────────────────────────────────────────
+
+def _mock_dir() -> Path:
+    """Resolve the Jenkins mock data directory."""
+    return Path(config.MOCK_DATA_DIR) / "jenkins"
+
+
+def _mock_build_number(url: str) -> str | None:
+    """Extract the build number from a Jenkins build URL, or None for job URLs."""
+    m = re.search(r"/job/[^/]+/(\d+)/?$", url.rstrip("/"))
+    return m.group(1) if m else None
+
+
+def _mock_get_jenkins_builds(job_url: str, limit: int) -> str:
+    d = _mock_dir()
+    path = d / "builds.json"
+    if not path.exists():
+        return json.dumps({"error": f"[MOCK] builds.json not found in {d}"})
+    data = json.loads(path.read_text())
+    data["job_url"] = job_url
+    data["builds"] = data.get("builds", [])[:limit]
+    return json.dumps(data, indent=2)
+
+
+def _mock_fetch_build_log(build_url: str) -> str:
+    num = _mock_build_number(build_url)
+    d = _mock_dir()
+    if num:
+        path = d / f"build_{num}_log.txt"
+        if path.exists():
+            return path.read_text()
+        return (
+            f"[MOCK] No log file found for build {num}. "
+            f"Create {path} to add a mock log for this build number."
+        )
+    # Job URL — return the log for the most recent failed build
+    for f in sorted(d.glob("build_*_log.txt"), reverse=True):
+        return f.read_text()
+    return "[MOCK] No mock build log files found in " + str(d)
+
+
+def _mock_get_build_info(build_url: str) -> str:
+    num = _mock_build_number(build_url)
+    d = _mock_dir()
+    if num:
+        path = d / f"build_{num}_info.json"
+        if path.exists():
+            info = json.loads(path.read_text())
+            info["url"] = build_url
+            return json.dumps(info, indent=2)
+        return json.dumps({
+            "error": f"[MOCK] No info file for build {num}. "
+                     f"Create {path} to mock this build's metadata."
+        })
+    return json.dumps({"error": "[MOCK] Supply a build URL (with build number) for build info."})
 
 
 # ── Internal helpers ───────────────────────────────────────────────────────────
@@ -95,6 +156,8 @@ def _extract_test_results(actions: list[dict]) -> dict | None:
 ))
 def get_jenkins_builds(job_url: str, limit: int = 5) -> str:
     """Returns JSON with the most recent builds for a Jenkins job."""
+    if config.MOCK_JENKINS:
+        return _mock_get_jenkins_builds(job_url, limit)
     base = _normalize_url(job_url)
     # Jenkins tree API: fetch only the fields we need, capped at `limit` entries
     api_url = f"{base}api/json"
@@ -125,6 +188,8 @@ def get_jenkins_builds(job_url: str, limit: int = 5) -> str:
 ))
 def fetch_build_log(build_url: str) -> str:
     """Returns the raw console text of a Jenkins build (last 200 lines if large)."""
+    if config.MOCK_JENKINS:
+        return _mock_fetch_build_log(build_url)
     base = _normalize_url(build_url)
     console_url = f"{base}consoleText"
 
@@ -146,6 +211,8 @@ def fetch_build_log(build_url: str) -> str:
 ))
 def get_build_info(build_url: str) -> str:
     """Returns JSON with build metadata including parameters and test results."""
+    if config.MOCK_JENKINS:
+        return _mock_get_build_info(build_url)
     base = _normalize_url(build_url)
     api_url = f"{base}api/json"
 

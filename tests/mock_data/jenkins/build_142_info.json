@@ -1,0 +1,27 @@
+{
+  "url": "http://mock-jenkins/job/MyApp/142/",
+  "number": 142,
+  "result": "FAILURE",
+  "duration_ms": 12847,
+  "timestamp": 1705315847000,
+  "triggered_by": [
+    "Push to branch 'feature/user-service-refactor' by john.doe"
+  ],
+  "parameters": {
+    "BRANCH": "feature/user-service-refactor",
+    "DEPLOY_ENV": "staging",
+    "SKIP_TESTS": "false"
+  },
+  "test_results": null,
+  "changes": [
+    {
+      "author": "john.doe",
+      "message": "Refactor UserService to use new repository interface",
+      "files_changed": [
+        "src/main/java/com/acme/service/UserService.java",
+        "src/main/java/com/acme/service/OrderService.java",
+        "src/main/java/com/acme/repository/UserRepository.java"
+      ]
+    }
+  ]
+}

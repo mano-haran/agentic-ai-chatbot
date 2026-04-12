@@ -1,0 +1,82 @@
+<html>
+<head><title>Code Review and Pull Request Guidelines</title></head>
+<body>
+<h1>Code Review and Pull Request Guidelines</h1>
+<p>Code review is one of the most valuable practices in our engineering culture. It improves code quality, spreads knowledge, and catches bugs before they reach users. These guidelines ensure reviews are thorough, constructive, and consistent across teams.</p>
+
+<h2>Creating a Pull Request</h2>
+<p>A good PR makes the reviewer's job easy. Before opening a PR, ask yourself: "Could a team member who wasn't involved in this work understand what changed and why from the PR description alone?" If the answer is no, improve the description.</p>
+<h3>PR Size</h3>
+<p>Keep PRs small and focused. A PR should do one thing. If you are fixing a bug and you noticed a refactoring opportunity, do them in separate PRs. The ideal PR size is 200–400 lines of production code change (excluding tests and generated code). PRs over 1000 lines must be justified with a comment — consider whether they can be split.</p>
+<p>Large PRs are harder to review, take longer to merge, and cause more merge conflicts. If your feature is large, use feature flags and merge incrementally behind the flag.</p>
+<h3>PR Title</h3>
+<p>Format: <code>[JIRA-TICKET] Short description of what changed</code>. Example: <code>[MYAPP-1234] Add email validation to user registration</code>. Do not use vague titles like "Fix bug" or "Updates".</p>
+<h3>PR Description Template</h3>
+<p>Use the PR template that appears automatically when you open a PR on GitHub. Fill in every section:</p>
+<ul>
+<li><strong>What changed</strong>: A plain English summary of the changes. What does this code do differently from before?</li>
+<li><strong>Why</strong>: The business or technical reason for the change. Link the JIRA ticket.</li>
+<li><strong>How to test</strong>: Steps a reviewer can follow to manually verify the change. Include test data or environment setup if needed.</li>
+<li><strong>Risks</strong>: Any areas of uncertainty, potential side effects, or changes to behaviour that reviewers should pay particular attention to.</li>
+<li><strong>Screenshots</strong>: For UI changes, before and after screenshots are mandatory.</li>
+</ul>
+
+<h2>Review Standards</h2>
+<p>As a reviewer, your responsibility is to ensure the code is correct, maintainable, secure, and consistent with the codebase. Be thorough — a missed bug in review will become a production incident or a customer complaint.</p>
+<h3>What to Review</h3>
+<ul>
+<li><strong>Correctness</strong>: Does the code do what the PR description says? Are there edge cases that are not handled (null inputs, empty lists, concurrent access, network timeouts)?</li>
+<li><strong>Tests</strong>: Are there adequate tests for the new code? Do the tests test behaviour, not implementation? Are happy paths, sad paths, and edge cases covered?</li>
+<li><strong>Security</strong>: Is user input validated and sanitised? Are there SQL injection, XSS, or path traversal vulnerabilities? Are secrets handled correctly (not logged, not in version control)?</li>
+<li><strong>Performance</strong>: Are there N+1 database queries? Are large results paginated? Are expensive operations cached?</li>
+<li><strong>Maintainability</strong>: Is the code readable? Are variable and method names clear? Is there duplication that should be extracted? Are there comments for non-obvious logic?</li>
+<li><strong>Backwards compatibility</strong>: Does the change break any existing API contracts? If a database column is renamed, is the migration handled correctly?</li>
+</ul>
+<h3>Comment Conventions</h3>
+<p>Use the following prefixes to make your intent clear:</p>
+<ul>
+<li><code>nit:</code> Minor style issue. Non-blocking. Author can fix or ignore at their discretion.</li>
+<li><code>question:</code> Clarification request. Not blocking if author provides a satisfying explanation.</li>
+<li><code>suggestion:</code> Alternative approach to consider. Non-blocking.</li>
+<li><code>blocker:</code> Must be addressed before merge. Explicitly label blockers so authors know.</li>
+</ul>
+<p>Write comments as feedback on the code, not the author. "This method does X which could cause Y in Z scenario" is better than "Why did you write it this way?" Give specific suggestions when raising an issue — "Consider using Optional.orElseThrow() here to make the null handling explicit" is more helpful than "This could throw a NullPointerException."</p>
+
+<h2>Approval Requirements</h2>
+<p>All PRs require at least 2 approvals before merge. Rules:</p>
+<ul>
+<li>At least 1 approval must come from a developer outside your immediate pair (you cannot both approve each other's changes).</li>
+<li>For changes to core infrastructure code (framework, shared libraries, CI/CD), at least 1 approval must come from a Senior Engineer or above.</li>
+<li>For changes to security-sensitive code (authentication, authorisation, payment processing, PII handling), a security review from the AppSec team is required in addition to the 2 engineer approvals.</li>
+<li>Approvals are invalidated by new commits after the approval. A reviewer must re-approve after any non-trivial change.</li>
+</ul>
+
+<h2>Merge Policy</h2>
+<p>We use squash merges for all PRs. Each merged PR appears as a single commit on the main branch. Squash merge keeps the main branch history clean and readable.</p>
+<p>The merge commit message is the PR title plus the PR number. Ensure your PR title accurately describes the final state of the change before merging, not just the work you started with.</p>
+<p>Do not merge your own PRs even if you have the required approvals. The second reviewer merges, or the PR author asks the reviewing team lead to merge. This ensures a final human review at merge time rather than approving and forgetting.</p>
+<h3>Pre-Merge Checks</h3>
+<p>GitHub branch protection rules enforce: at least 2 approvals, CI pipeline passing (all tests green), no unresolved review threads, and branch up to date with main. You cannot override these — if any check is red, you cannot merge. Resolve all review comments before requesting re-review.</p>
+
+<h2>Code Review Checklist for Reviewers</h2>
+<p>Use this checklist when reviewing. You do not need to comment on every item — only raise issues when you find a problem. But do check every item.</p>
+<ul>
+<li>PR description is complete and explains the "what" and "why"</li>
+<li>Changes match the PR description and linked JIRA ticket</li>
+<li>All new code has test coverage</li>
+<li>Tests are meaningful (not just line coverage for coverage's sake)</li>
+<li>No hardcoded secrets, credentials, or environment-specific values</li>
+<li>Error cases are handled with appropriate logging</li>
+<li>Database queries use parameterised statements</li>
+<li>API responses do not leak sensitive data</li>
+<li>No System.out.println or console.log in production code</li>
+<li>New dependencies are justified and vetted for security vulnerabilities</li>
+<li>Logging is at appropriate levels (not DEBUG in hot paths)</li>
+<li>Breaking changes are documented and migration path is provided</li>
+</ul>
+
+<h2>Review Turnaround Time</h2>
+<p>Reviews should be completed within 1 business day of being requested. If you cannot review within that time, comment on the PR to let the author know and suggest an alternative reviewer. Blocked PRs stall the team — do not leave a PR waiting more than 2 business days without communication.</p>
+<p>If your PR has been waiting for review for more than 1 business day, ping the reviewer in Slack. After 2 business days with no response, ask your team lead to assign a different reviewer.</p>
+</body>
+</html>

@@ -1,0 +1,73 @@
+<html>
+<head><title>Incident Response Runbook</title></head>
+<body>
+<h1>Incident Response Runbook</h1>
+<p>This runbook describes how to detect, respond to, communicate about, and learn from production incidents. All engineers are expected to know this process. If you are the on-call engineer, read this page in full before your rotation starts.</p>
+
+<h2>Severity Levels</h2>
+<p>We classify incidents into four severity levels. The level determines response time, who is involved, and how we communicate. Err on the side of higher severity when uncertain — it is always better to escalate and scale back than to under-respond.</p>
+<ul>
+<li><strong>P0 — Critical</strong>: Complete service outage or data loss affecting all or most users. Payment processing down. Immediate response required 24/7. Response time: 5 minutes.</li>
+<li><strong>P1 — High</strong>: Major functionality broken for a significant portion of users. Performance degraded by more than 50%. Checkout or authentication affected. Response time: 15 minutes.</li>
+<li><strong>P2 — Medium</strong>: Non-critical feature broken or performance degraded for a subset of users. Workaround available. Response time: 1 hour during business hours.</li>
+<li><strong>P3 — Low</strong>: Minor issues, cosmetic bugs, or monitoring anomalies with no user impact. Response time: next business day.</li>
+</ul>
+
+<h2>Detection and Alerting</h2>
+<p>Most incidents are detected by our automated monitoring before users report them. We use Datadog for metrics and alerting, PagerDuty for on-call routing, and Sentry for application errors.</p>
+<h3>Alert Sources</h3>
+<ul>
+<li><strong>Datadog monitors</strong> — Fire when metrics breach thresholds (error rate, latency, pod restarts). Routed to PagerDuty.</li>
+<li><strong>Sentry</strong> — New exception types or error rate spikes trigger alerts in #incidents Slack channel.</li>
+<li><strong>Synthetic monitors</strong> — Datadog runs synthetic tests against critical user journeys every 60 seconds from multiple regions. Failure triggers immediate P0/P1 alert.</li>
+<li><strong>User reports</strong> — Users may report issues via support before monitoring catches them. Support team posts to #incidents with a severity assessment.</li>
+</ul>
+<h3>Verifying an Alert</h3>
+<p>Before declaring an incident, spend 2 minutes verifying the alert is real. Check: Is Datadog itself having issues (check status.datadoghq.com)? Is the alert from a single region or all regions? Is there a deployment in progress that explains the anomaly? If the alert is real and affects users, declare an incident immediately without further investigation.</p>
+
+<h2>Initial Response Steps</h2>
+<p>When you receive a PagerDuty alert or see a critical issue in Slack, take these steps immediately. Speed matters — do not spend time investigating root cause before taking the first three steps.</p>
+<h3>Step 1 — Acknowledge</h3>
+<p>Acknowledge the PagerDuty alert within 5 minutes. If you cannot respond, escalate immediately to your backup on-call. Silence the alert only after you have personally confirmed someone is actively working on it.</p>
+<h3>Step 2 — Open an Incident</h3>
+<p>Create an incident in PagerDuty. This automatically creates a Slack incident channel named #incident-YYYY-MM-DD-description and a Jira incident ticket. Set the severity based on the impact.</p>
+<h3>Step 3 — Communicate</h3>
+<p>Post in the incident channel within 5 minutes of acknowledgement: "Investigating [brief description]. Severity: P[X]. Impact: [who is affected]. Current status: investigating." Update every 15 minutes minimum, even if there is nothing new to report — silence is worse than "still investigating."</p>
+<h3>Step 4 — Assemble the Team</h3>
+<p>For P0/P1: tag your team lead and the VP Engineering in the incident channel. They may join or delegate — either way, they need to know. For P2/P3, you can handle it alone unless you need help.</p>
+<h3>Step 5 — Investigate and Mitigate</h3>
+<p>Start with mitigation, not root cause. The goal in the first 30 minutes is to stop user impact, not to understand why it happened. Options in order of speed: rollback the last deployment, restart failing pods, scale up the affected service, enable a maintenance page, disable the affected feature flag. Implement the fastest mitigation that stops user impact.</p>
+
+<h2>Escalation Matrix</h2>
+<p>Who to contact and when:</p>
+<ul>
+<li><strong>First response</strong>: On-call engineer (via PagerDuty)</li>
+<li><strong>After 15 minutes (P0/P1 unresolved)</strong>: On-call lead (second PagerDuty tier)</li>
+<li><strong>After 30 minutes (P0 unresolved)</strong>: VP Engineering — call their mobile directly</li>
+<li><strong>User-facing P0</strong>: Customer Success team — they manage external communication</li>
+<li><strong>Data breach suspected</strong>: CISO and Legal — immediately, no exceptions</li>
+<li><strong>Payment system affected</strong>: Finance team lead — they manage payment processor communication</li>
+</ul>
+
+<h2>Communication Templates</h2>
+<h3>Internal Status Updates (every 15 minutes)</h3>
+<p>Post in the incident channel: "Status update [HH:MM UTC]: [What is still happening]. [What we have tried]. [Current working hypothesis]. [Next action and owner]. ETA for next update: [HH:MM UTC]."</p>
+<h3>External Status Page Update</h3>
+<p>For P0/P1 incidents, update the public status page at status.acme.com via the Statuspage.io dashboard. Use plain language — no technical jargon. Example: "We are experiencing elevated error rates for some users. Our team is actively investigating. We will provide an update in 30 minutes."</p>
+<h3>Resolution Announcement</h3>
+<p>When the incident is resolved, post: "RESOLVED [HH:MM UTC]: [What was happening]. [What we did to fix it]. Duration: [X hours Y minutes]. Users affected: [estimate]. Root cause investigation underway." Update the status page to "Operational" and close the PagerDuty incident.</p>
+
+<h2>Postmortem Process</h2>
+<p>A blameless postmortem is required for all P0 and P1 incidents, and optional for P2. The goal is to learn and improve, not to find someone to blame. Postmortems must be completed within 5 business days of the incident.</p>
+<h3>Postmortem Structure</h3>
+<ul>
+<li><strong>Summary</strong>: What happened, when, impact (users affected, duration, revenue impact if known)</li>
+<li><strong>Timeline</strong>: Minute-by-minute timeline from first alert to resolution</li>
+<li><strong>Root cause</strong>: The technical cause. Use the "5 Whys" technique to find the systemic cause, not just the proximate cause</li>
+<li><strong>Contributing factors</strong>: What made this incident worse or harder to detect (missing monitoring, unclear runbook, slow rollback)</li>
+<li><strong>What went well</strong>: Things that helped — good alerting, fast communication, effective rollback</li>
+<li><strong>Action items</strong>: Concrete tasks to prevent recurrence. Each must have an owner and a due date. Add to JIRA immediately.</li>
+</ul>
+<p>Postmortem documents are stored in Confluence → Engineering → Postmortems. They are public to all of engineering and referenced during quarterly reviews.</p>
+</body>
+</html>
