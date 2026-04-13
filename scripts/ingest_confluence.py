@@ -9,7 +9,7 @@ Usage examples:
   python scripts/ingest_confluence.py --space DEV
 
   # Ingest specific pages by ID
-  python scripts/ingest_confluence.py --pages 123456 789012
+  python scripts/ingest_confluence.py --pages 56408673 99568862
 
   # Ingest local HTML/Markdown files (useful for testing without Confluence access)
   python scripts/ingest_confluence.py --dir docs/
