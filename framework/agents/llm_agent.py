@@ -1,9 +1,21 @@
+import re
 from typing import Any
 from pydantic import BaseModel
 from langchain_core.messages import SystemMessage
 from langchain_core.tools import StructuredTool
 from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode
+
+# Some LLM backends (e.g. Phi-3 variants) emit internal control tokens such as
+# <|end|>, <|start|>, <|channel|> inside the response text.  If these reach the
+# context history, subsequent API calls fail with formatting/validation errors.
+_ARTIFACT_TOKEN_RE = re.compile(r"<\|[^|>]*\|>")
+
+
+def _strip_artifact_tokens(text: str) -> str:
+    """Remove internal LLM artifact tokens (e.g. <|end|>, <|start|>) from text."""
+    return _ARTIFACT_TOKEN_RE.sub("", text).strip()
+
 
 import config
 from framework.agents.base import BaseAgent, CLARIFICATION_INSTRUCTION
@@ -129,6 +141,17 @@ class LLMAgent(BaseAgent):
                     for b in content
                     if not (isinstance(b, dict) and b.get("type") == "tool_use")
                 )
+            # Strip artifact tokens from the normalised string.
+            content = _strip_artifact_tokens(content)
+            # Also sanitise response.content so the AIMessage stored in the
+            # messages history is clean — contaminated history causes subsequent
+            # LLM calls to fail with formatting errors.
+            if isinstance(response.content, str):
+                response.content = _strip_artifact_tokens(response.content)
+            elif isinstance(response.content, list):
+                for block in response.content:
+                    if isinstance(block, dict) and "text" in block:
+                        block["text"] = _strip_artifact_tokens(block["text"])
             return {
                 "messages": [response],
                 "next_agent": self.name,
