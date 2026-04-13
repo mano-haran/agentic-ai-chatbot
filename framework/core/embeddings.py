@@ -39,7 +39,7 @@ def get_embeddings() -> Embeddings:
     if provider == "openai":
         from langchain_openai import OpenAIEmbeddings
         # Default to text-embedding-3-small when EMBEDDING_MODEL is not set.
-        openai_model = model or "text-embedding-3-small"
+        openai_model = model
         # Build kwargs explicitly so custom endpoints (e.g. an OpenAI-compatible
         # gateway serving bge-m3 or similar) are always used.  Relying on
         # OPENAI_API_BASE / OPENAI_BASE_URL env vars is fragile — the LLM and
