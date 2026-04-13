@@ -201,7 +201,10 @@ def _docling_to_chunks(html: str, title: str, url: str, page_id: str) -> list[di
     import os
     import tempfile
 
-    # Ensure HuggingFace libraries stay offline before any import
+    # Ensure HuggingFace libraries stay offline before any import.
+    # HF_HUB_OFFLINE is the primary flag for huggingface_hub >=0.12;
+    # TRANSFORMERS_OFFLINE covers older transformers; HF_DATASETS_OFFLINE covers datasets.
+    os.environ.setdefault("HF_HUB_OFFLINE", "1")
     os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
     os.environ.setdefault("HF_DATASETS_OFFLINE", "1")
 
@@ -239,10 +242,11 @@ def _docling_to_chunks(html: str, title: str, url: str, page_id: str) -> list[di
                 if tokenizer is not None
                 else HybridChunker()
             )
-        except Exception:
-            # Older docling: no `tokenizer` kwarg (TypeError).
-            # Newer docling with unrecognised tokenizer type: Pydantic ValidationError.
-            # Either way fall back to the default tokenizer.
+        except TypeError:
+            # Very old docling: `tokenizer` kwarg not accepted.  Retry bare — if the
+            # default tokenizer also requires a HuggingFace download and HF_HUB_OFFLINE
+            # is set, this will raise an EnvironmentError which propagates to
+            # _page_to_chunks and triggers the HTML fallback (correct behaviour).
             chunker = HybridChunker()
 
         chunks: list[dict] = []
