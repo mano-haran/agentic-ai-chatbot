@@ -24,7 +24,9 @@ httpx>=0.27.0                    # HTTP client for OpenAI-compatible reranker en
 # ── RAG improvements (optional — uncomment to enable each layer) ───────────────
 # docling>=2.0.0                 # CHUNKING_STRATEGY=docling — context-aware chunking
 #                                #   tables/code preserved as atomic units; heading breadcrumbs
-#                                #   Air-gapped: set DOCLING_TOKENIZER_MODEL to a local path
+#                                #   DOCLING_TOKENIZER_PROVIDER=openai_compatible: tiktoken used
+#                                #   (no extra package — tiktoken ships with langchain-openai)
+#                                #   DOCLING_TOKENIZER_PROVIDER=local: set DOCLING_TOKENIZER_MODEL
 # rank-bm25>=0.2.2               # ENABLE_BM25=true — BM25 keyword index for hybrid retrieval
 #                                #   Pure Python; no network dependency
 # sentence-transformers>=3.0.0   # RERANKER_PROVIDER=local — local CrossEncoder reranker
