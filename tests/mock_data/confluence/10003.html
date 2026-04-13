@@ -1,0 +1,134 @@
+<html>
+<head><title>Jenkins Setup and Configuration</title></head>
+<body>
+<h1>Jenkins Setup and Configuration</h1>
+<p>This page covers how to configure Jenkins for your team's pipelines, manage credentials, use the shared pipeline library, and troubleshoot common build failures. Jenkins is our primary CI/CD platform, running at https://jenkins.acme.com.</p>
+
+<h2>Accessing Jenkins</h2>
+<p>Log in using your corporate SSO credentials at https://jenkins.acme.com. If this is your first time, you need to be added to the engineering organisation in Jenkins — ask your team lead to add you via Manage Jenkins → Manage and Assign Roles. New developers are given the Developer role by default, which allows triggering builds and viewing logs but not changing job configuration.</p>
+
+<h2>Jenkins Credentials Management</h2>
+<p>Credentials (API keys, passwords, SSH keys) are stored in the Jenkins credential store, never in source code or Jenkinsfiles. All secrets in source code will be caught by our git pre-commit hook and the commit will be blocked.</p>
+<h3>Adding New Credentials</h3>
+<p>Navigate to Jenkins → Manage Jenkins → Credentials → (global) → Add Credentials. Choose the correct credential type:</p>
+<ul>
+<li><strong>Username with password</strong> — For service accounts (e.g. Nexus, Docker registry)</li>
+<li><strong>Secret text</strong> — For API tokens and simple string secrets</li>
+<li><strong>SSH username with private key</strong> — For Git SSH authentication</li>
+<li><strong>Certificate</strong> — For PKCS12 keystores</li>
+</ul>
+<p>Credential IDs follow the naming convention: <code>service-environment-purpose</code>. Examples: <code>nexus-prod-deploy</code>, <code>github-token-ci</code>, <code>aws-staging-ecr</code>. Use lowercase and hyphens only.</p>
+<h3>Using Credentials in Pipelines</h3>
+<p>Access credentials in your Jenkinsfile using the <code>credentials()</code> binding or the <code>withCredentials</code> block:</p>
+<pre>
+// Secret text or username+password
+environment {
+    NEXUS_CREDS = credentials('nexus-prod-deploy')
+}
+
+// Inside a stage
+steps {
+    withCredentials([usernamePassword(credentialsId: 'nexus-prod-deploy',
+                                     usernameVariable: 'NEXUS_USER',
+                                     passwordVariable: 'NEXUS_PASS')]) {
+        sh 'mvn deploy -Dnexus.user=$NEXUS_USER -Dnexus.pass=$NEXUS_PASS'
+    }
+}
+</pre>
+<p>Never echo credentials to the console. Jenkins masks bound credential values in logs, but <code>set -x</code> in shell scripts can still expose them — avoid using <code>set -x</code> in pipeline steps that use credentials.</p>
+<h3>Rotating Credentials</h3>
+<p>When a credential needs to be rotated (e.g. token expiry, security incident), update the credential in Jenkins first, then verify pipelines still work before revoking the old token. Revoking before updating causes immediate build failures across all pipelines using that credential.</p>
+
+<h2>Pipeline Configuration</h2>
+<p>All pipelines are defined as Jenkinsfiles in the repository root. We use declarative pipeline syntax. Scripted pipeline syntax is not permitted for new pipelines (legacy pipelines are being migrated).</p>
+<h3>Standard Pipeline Structure</h3>
+<pre>
+@Library('acme-shared-lib@main') _
+
+pipeline {
+    agent { label 'java-17' }
+
+    options {
+        timeout(time: 30, unit: 'MINUTES')
+        buildDiscarder(logRotator(numToKeepStr: '20'))
+        disableConcurrentBuilds()
+    }
+
+    environment {
+        APP_NAME = 'myapp'
+        DOCKER_REGISTRY = 'registry.acme.com'
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+        stage('Build') {
+            steps {
+                sh 'mvn clean package -DskipTests -B'
+            }
+        }
+        stage('Test') {
+            steps {
+                sh 'mvn test -B'
+            }
+            post {
+                always {
+                    junit 'target/surefire-reports/**/*.xml'
+                }
+            }
+        }
+        stage('Docker Build & Push') {
+            when { branch 'main' }
+            steps {
+                script {
+                    dockerBuildAndPush(APP_NAME, DOCKER_REGISTRY)
+                }
+            }
+        }
+    }
+
+    post {
+        failure {
+            slackNotify(channel: '#builds', message: "FAILED: ${env.JOB_NAME} #${env.BUILD_NUMBER}")
+        }
+    }
+}
+</pre>
+
+<h2>Shared Pipeline Library</h2>
+<p>The shared library (acme/jenkins-pipelines on GitHub) contains reusable pipeline functions. Import it with <code>@Library('acme-shared-lib@main') _</code> at the top of your Jenkinsfile.</p>
+<h3>Available Functions</h3>
+<ul>
+<li><code>dockerBuildAndPush(appName, registry)</code> — Builds and pushes a Docker image tagged with the Git commit SHA and the branch name.</li>
+<li><code>slackNotify(channel, message)</code> — Sends a Slack notification. Picks up the webhook URL from the Jenkins credential <code>slack-webhook-url</code>.</li>
+<li><code>runSmokeSuite(environment)</code> — Runs the Maven smoke test profile against the specified environment.</li>
+<li><code>kubeRollingDeploy(app, namespace, imageTag)</code> — Performs a kubectl rolling update and waits for rollout completion.</li>
+<li><code>sonarScan(projectKey)</code> — Runs SonarQube analysis and enforces the quality gate.</li>
+</ul>
+
+<h2>Build Agents</h2>
+<p>Build agents are provisioned dynamically from Kubernetes. Each agent type has a specific label:</p>
+<ul>
+<li><code>java-17</code> — Java 17 + Maven 3.9 + Docker CLI. Use for all Java builds.</li>
+<li><code>node-20</code> — Node.js 20 + npm + Docker CLI. Use for frontend builds.</li>
+<li><code>terraform</code> — Terraform 1.7 + AWS CLI + kubectl. Use for infrastructure changes.</li>
+<li><code>docker</code> — Docker-in-Docker. Use only when you need to run containers inside the build.</li>
+</ul>
+<p>Agents start in under 60 seconds. If your build is waiting more than 2 minutes for an agent, check the Kubernetes node capacity in the jenkins namespace: <code>kubectl get nodes</code> and <code>kubectl top nodes</code>.</p>
+
+<h2>Troubleshooting Common Build Failures</h2>
+<h3>Compilation Errors</h3>
+<p>If you see <code>[ERROR] COMPILATION ERROR</code> in the build log, the Java source code cannot be compiled. Common causes: missing method in an interface (another developer changed the interface without updating all implementations), incompatible types (API change in a shared library), or import resolution failure (dependency not in pom.xml). Check the exact error line — it will reference the file and line number. Compare your branch's pom.xml dependencies with main's to spot version mismatches.</p>
+<h3>Test Failures</h3>
+<p>When tests fail, look for <code>Tests run: X, Failures: Y</code> in the Maven output. Click the test results link in Jenkins to see the full failure report. The most common causes are: mocking setup incorrect (verify your @MockBean annotations), database state not reset between tests (use @Transactional or @DirtiesContext), or a timing issue in async tests (increase timeouts or use Awaitility).</p>
+<h3>Docker Push Failures</h3>
+<p>If <code>docker push</code> fails with authentication error, the Jenkins credential <code>aws-staging-ecr</code> may have expired. ECR tokens expire every 12 hours. The shared library function <code>dockerBuildAndPush</code> refreshes the token automatically, but if you are not using the shared library, add <code>aws ecr get-login-password | docker login ...</code> before the push.</p>
+<h3>Out of Memory Errors</h3>
+<p>If Maven fails with <code>OutOfMemoryError: Java heap space</code>, the agent's memory limit is too low for your build. Set MAVEN_OPTS in your Jenkinsfile: <code>environment { MAVEN_OPTS = '-Xmx2g' }</code>. If already set and still failing, the agent pod may need a higher memory limit — contact the platform team.</p>
+<h3>Slow Builds</h3>
+<p>If builds are taking more than 20 minutes, first check if you can parallelize test stages. Use the Maven Surefire <code>forkCount</code> setting to run tests in parallel: add <code>-DforkCount=2 -DreuseForks=true</code> to your test command. If builds were fast before and have slowed recently, check if a new dependency is causing slow resolution — a Nexus proxy issue can cause Maven to wait for each dependency.</p>
+</body>
+</html>

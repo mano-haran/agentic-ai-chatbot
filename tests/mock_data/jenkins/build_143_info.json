@@ -1,0 +1,31 @@
+{
+  "url": "http://mock-jenkins/job/MyApp/143/",
+  "number": 143,
+  "result": "FAILURE",
+  "duration_ms": 98540,
+  "timestamp": 1705402247000,
+  "triggered_by": [
+    "Push to branch 'main' by sarah.chen"
+  ],
+  "parameters": {
+    "BRANCH": "main",
+    "DEPLOY_ENV": "staging",
+    "SKIP_TESTS": "false"
+  },
+  "test_results": {
+    "total": 41,
+    "failed": 2,
+    "skipped": 0
+  },
+  "changes": [
+    {
+      "author": "sarah.chen",
+      "message": "Add integration tests for payment gateway",
+      "files_changed": [
+        "src/test/java/com/acme/integration/PaymentGatewayIntegrationTest.java",
+        "src/main/java/com/acme/service/UserService.java",
+        "src/main/java/com/acme/service/NotificationService.java"
+      ]
+    }
+  ]
+}

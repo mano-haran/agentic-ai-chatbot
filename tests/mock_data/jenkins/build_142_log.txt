@@ -1,0 +1,68 @@
+Started by GitHub push by john.doe
+[Pipeline] Start of Pipeline
+[Pipeline] node
+Running on jenkins-agent-01 in /workspace/MyApp
+[Pipeline] {
+[Pipeline] stage
+[Pipeline] { (Checkout)
+Cloning repository https://github.com/acme/MyApp.git
+ > git init /workspace/MyApp
+ > git fetch --tags --force --progress https://github.com/acme/MyApp.git +refs/heads/*:refs/remotes/origin/*
+ > git checkout feature/user-service-refactor
+Commit message: "Refactor UserService to use new repository interface"
+[Pipeline] }
+
+[Pipeline] stage
+[Pipeline] { (Build)
+[Pipeline] sh
++ mvn clean package -DskipTests=false -B
+[INFO] Scanning for projects...
+[INFO]
+[INFO] ------------------------------------------------------------------
+[INFO] Building MyApp 2.4.1-SNAPSHOT
+[INFO] ------------------------------------------------------------------
+[INFO]
+[INFO] --- maven-clean-plugin:3.2.0:clean (default-clean) ---
+[INFO] Deleting /workspace/MyApp/target
+[INFO]
+[INFO] --- maven-resources-plugin:3.3.1:resources (default-resources) ---
+[INFO] Using 'UTF-8' encoding to copy filtered resources.
+[INFO] Copying 12 resources to /workspace/MyApp/target/classes
+[INFO]
+[INFO] --- maven-compiler-plugin:3.11.0:compile (default-compile) ---
+[INFO] Changes detected - recompiling the module! :source
+[INFO] Compiling 47 source files to /workspace/MyApp/target/classes
+[ERROR] COMPILATION ERROR :
+[ERROR] /workspace/MyApp/src/main/java/com/acme/service/UserService.java:[87,32]
+        error: cannot find symbol
+              symbol:   method getUserById(Long)
+              location: interface com.acme.repository.UserRepository
+[ERROR] /workspace/MyApp/src/main/java/com/acme/service/OrderService.java:[134,18]
+        error: incompatible types: found Optional<Order>, required List<Order>
+[ERROR] /workspace/MyApp/src/main/java/com/acme/service/OrderService.java:[156,24]
+        error: cannot find symbol
+              symbol:   method findActiveByUserId(Long)
+              location: class com.acme.repository.OrderRepository
+[INFO] 3 errors
+[INFO] ------------------------------------------------------------------
+[INFO] BUILD FAILURE
+[INFO] ------------------------------------------------------------------
+[INFO] Total time:  12.847 s
+[INFO] Finished at: 2024-01-15T10:32:27Z
+[INFO] ------------------------------------------------------------------
+[ERROR] Failed to execute goal org.apache.maven.plugins:maven-compiler-plugin:3.11.0:compile
+        (default-compile) on project MyApp: Compilation failure
+[ERROR] /workspace/MyApp/src/main/java/com/acme/service/UserService.java:[87,32]
+        error: cannot find symbol
+              symbol:   method getUserById(Long)
+              location: interface com.acme.repository.UserRepository
+[ERROR] /workspace/MyApp/src/main/java/com/acme/service/OrderService.java:[134,18]
+        error: incompatible types: found Optional<Order>, required List<Order>
+[ERROR] /workspace/MyApp/src/main/java/com/acme/service/OrderService.java:[156,24]
+        error: cannot find symbol
+              symbol:   method findActiveByUserId(Long)
+              location: class com.acme.repository.OrderRepository
+[ERROR] -> [Help 1]
+[Pipeline] }
+[Pipeline] End of Pipeline
+Finished: FAILURE

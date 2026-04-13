@@ -1,3 +1,4 @@
+import re
 from typing import Any
 from pydantic import BaseModel
 from langchain_core.messages import SystemMessage
@@ -5,8 +6,19 @@ from langchain_core.tools import StructuredTool
 from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode
 
+# Some LLM backends (e.g. Phi-3 variants) emit internal control tokens such as
+# <|end|>, <|start|>, <|channel|> inside the response text.  If these reach the
+# context history, subsequent API calls fail with formatting/validation errors.
+_ARTIFACT_TOKEN_RE = re.compile(r"<\|[^|>]*\|>")
+
+
+def _strip_artifact_tokens(text: str) -> str:
+    """Remove internal LLM artifact tokens (e.g. <|end|>, <|start|>) from text."""
+    return _ARTIFACT_TOKEN_RE.sub("", text).strip()
+
+
 import config
-from framework.agents.base import BaseAgent
+from framework.agents.base import BaseAgent, CLARIFICATION_INSTRUCTION
 from framework.core.state import AgentState
 from framework.providers.factory import get_llm
 
@@ -78,6 +90,8 @@ class LLMAgent(BaseAgent):
                 "task_results": {},
                 "metadata": {},
                 "error": None,
+                "clarification_needed": False,
+                "clarification_questions": [],
             })
             msgs = result.get("messages", [])
             return msgs[-1].content if msgs else "(no response)"
@@ -106,7 +120,11 @@ class LLMAgent(BaseAgent):
         if all_tools:
             llm = llm.bind_tools(all_tools)
 
-        system_msg = SystemMessage(content=self.role)
+        # Append the clarification protocol to the agent's role so every agent
+        # knows exactly how to signal that it needs more information from the user.
+        # The framework (make_agent_node) detects and strips the structured marker
+        # before the response reaches the user.
+        system_msg = SystemMessage(content=self.role + CLARIFICATION_INSTRUCTION)
 
         # Async node so we stay on the event loop and avoid thread-executor
         # issues that can cause silent failures when llm.invoke() is called
@@ -123,6 +141,17 @@ class LLMAgent(BaseAgent):
                     for b in content
                     if not (isinstance(b, dict) and b.get("type") == "tool_use")
                 )
+            # Strip artifact tokens from the normalised string.
+            content = _strip_artifact_tokens(content)
+            # Also sanitise response.content so the AIMessage stored in the
+            # messages history is clean — contaminated history causes subsequent
+            # LLM calls to fail with formatting errors.
+            if isinstance(response.content, str):
+                response.content = _strip_artifact_tokens(response.content)
+            elif isinstance(response.content, list):
+                for block in response.content:
+                    if isinstance(block, dict) and "text" in block:
+                        block["text"] = _strip_artifact_tokens(block["text"])
             return {
                 "messages": [response],
                 "next_agent": self.name,

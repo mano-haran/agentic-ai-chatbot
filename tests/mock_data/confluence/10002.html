@@ -1,0 +1,63 @@
+<html>
+<head><title>Production Deployment Process</title></head>
+<body>
+<h1>Production Deployment Process</h1>
+<p>This page describes the end-to-end process for deploying changes to production. All production deployments must follow this process without exception. Deviations require written approval from the VP of Engineering and must be documented in the deployment record.</p>
+<p>Production deployments are allowed Monday through Thursday between 10:00 AM and 3:00 PM UTC. No deployments on Fridays or during a freeze window. Check the #deployments Slack channel for current freeze status before starting.</p>
+
+<h2>Pre-Deployment Checklist</h2>
+<p>Complete every item on this checklist before requesting deployment approval. Do not skip items — each has caused production incidents in the past.</p>
+<ul>
+<li><strong>JIRA ticket</strong> — Every deployment must be linked to a JIRA ticket in DONE status. No ticket = no deployment.</li>
+<li><strong>CI pipeline green</strong> — The build and all tests (unit + integration) must be passing on the main branch. Link to the passing Jenkins build in your deployment record.</li>
+<li><strong>Staging deployment verified</strong> — Deploy to staging first. Run the smoke test suite (<code>mvn verify -P smoke-tests -Denv=staging</code>). All tests must pass.</li>
+<li><strong>Database migrations reviewed</strong> — If the release includes Liquibase migrations, have another engineer review them. Destructive migrations (DROP COLUMN, DROP TABLE) are prohibited in the same release as the application change — use the expand-contract pattern.</li>
+<li><strong>Feature flags configured</strong> — New features behind a feature flag must have the flag set to OFF in production before deployment. Enable the flag separately after deployment validation.</li>
+<li><strong>Rollback plan documented</strong> — Write a rollback procedure in your deployment record. "Redeploy previous version" is not sufficient — document the exact steps including any database rollback if applicable.</li>
+<li><strong>On-call engineer notified</strong> — Notify the on-call engineer in #incidents at least 30 minutes before starting. They need to be available during and immediately after deployment.</li>
+<li><strong>Deployment record created</strong> — Fill out the deployment record template in Confluence → Deployments → Records. Link to this page for the process.</li>
+</ul>
+
+<h2>Approval Process</h2>
+<p>All production deployments require approval from two people: your team lead AND one of: the on-call engineer, the release manager, or the VP Engineering. Approvals are given in the JIRA ticket. Self-approval is not permitted.</p>
+<p>Emergency deployments (P0 incident hotfixes) can be approved by any single Senior Engineer or above, but must be reviewed within 24 hours. Document emergency deployments in the #incidents channel and create a follow-up JIRA ticket for the review.</p>
+
+<h2>Deployment Steps</h2>
+<p>Once pre-deployment checklist is complete and approvals are obtained, follow these steps exactly in order.</p>
+<h3>Step 1 — Announce the Deployment</h3>
+<p>Post in #deployments: "Starting deployment of MyApp v2.4.1 to production. JIRA: MYAPP-1234. On-call: @engineer-name. ETA: 20 minutes."</p>
+<h3>Step 2 — Enable Maintenance Mode (if needed)</h3>
+<p>For deployments that include breaking API changes or long-running migrations, enable maintenance mode: <code>kubectl set env deployment/myapp MAINTENANCE_MODE=true -n production</code>. Maintenance mode shows a 503 to users with a "scheduled maintenance" message.</p>
+<h3>Step 3 — Run Database Migrations</h3>
+<p>If the release includes database migrations, run them before deploying the application code. Migrations run automatically on startup when APPLY_MIGRATIONS=true, but for production we run them manually first: <code>kubectl run --rm -it --image=acme/myapp:v2.4.1 --restart=Never migrate-job -- java -jar app.jar --spring.profiles.active=production migrate-only</code>. Verify the migrations completed successfully in the job logs before proceeding.</p>
+<h3>Step 4 — Deploy the Application</h3>
+<p>Update the image tag in the production Kubernetes deployment: <code>kubectl set image deployment/myapp app=acme/myapp:v2.4.1 -n production</code>. Watch the rollout: <code>kubectl rollout status deployment/myapp -n production</code>. This should complete in under 5 minutes. If it takes longer, investigate immediately.</p>
+<h3>Step 5 — Verify Health</h3>
+<p>After the rollout completes, verify the application is healthy. Check the Kubernetes readiness probes are passing: <code>kubectl get pods -n production -l app=myapp</code>. All pods should show Running and 1/1 READY. Hit the health endpoint: <code>curl https://api.acme.com/actuator/health</code> — expect <code>{"status":"UP"}</code>. Check Datadog for error rate and latency spikes in the myapp service dashboard.</p>
+<h3>Step 6 — Run Smoke Tests</h3>
+<p>Run the production smoke test suite: <code>mvn verify -P smoke-tests -Denv=production</code>. These tests run against live production endpoints and verify critical user journeys (login, create order, payment). All tests must pass before closing the deployment window.</p>
+<h3>Step 7 — Enable Feature Flags (if applicable)</h3>
+<p>If the deployment included features behind flags, enable them now via the feature flag dashboard at flags.acme.com. Enable flags one at a time with 5 minutes between each to isolate any issues.</p>
+<h3>Step 8 — Announce Completion</h3>
+<p>Post in #deployments: "Deployment of MyApp v2.4.1 completed successfully. Smoke tests passing. Monitoring for 30 minutes." Stay available for 30 minutes after deployment.</p>
+
+<h2>Rollback Procedure</h2>
+<p>If anything goes wrong during or after deployment, roll back immediately. Do not attempt to fix forward unless the issue is trivial (< 5 minutes to fix). Speed of rollback is more important than preserving the new code.</p>
+<h3>Application Rollback</h3>
+<p>Kubernetes maintains rollout history. To roll back to the previous version: <code>kubectl rollout undo deployment/myapp -n production</code>. Verify the rollback: <code>kubectl rollout status deployment/myapp -n production</code>. This takes the same time as a forward deployment (under 5 minutes).</p>
+<h3>Database Rollback</h3>
+<p>Database rollbacks are high-risk. If migrations have been applied, assess whether they can be rolled back without data loss. For additive-only migrations (ADD COLUMN, CREATE TABLE) that have not had data written to the new columns, you can roll back the migration using Liquibase rollback. For migrations that modified existing data, do NOT attempt an automated rollback — escalate to the database team immediately.</p>
+<h3>Announcing a Rollback</h3>
+<p>Post in #deployments immediately: "ROLLING BACK MyApp v2.4.1. Reason: [brief description]. Rollback started at [time]. On-call: @engineer-name." Create a P1 incident if users are affected. After rollback, create a JIRA ticket to track the investigation.</p>
+
+<h2>Post-Deployment Monitoring</h2>
+<p>Stay on the Datadog dashboard for at least 30 minutes after every production deployment. Key metrics to watch:</p>
+<ul>
+<li>Error rate — should stay below 0.1% of requests. Alert threshold is 0.5%.</li>
+<li>P99 latency — API endpoints should stay below 500 ms. Alert threshold is 1000 ms.</li>
+<li>Database query time — P99 should stay below 100 ms.</li>
+<li>JVM heap usage — should not continuously increase (would indicate a memory leak in the new code).</li>
+</ul>
+<p>If any metric breaches its alert threshold, initiate rollback and open a P1 incident.</p>
+</body>
+</html>

@@ -25,10 +25,101 @@ Four tools are exposed:
 
 from __future__ import annotations
 
+import json
 import re
+from datetime import datetime, timezone
 from functools import lru_cache
+from pathlib import Path
 
 import config
+
+
+# ── Mock mode helpers ──────────────────────────────────────────────────────────
+
+def _mock_confluence_dir() -> Path:
+    return Path(config.MOCK_DATA_DIR) / "confluence"
+
+
+def _mock_fetch_page_by_id(page_id: str, query: str) -> str:
+    """
+    Read a mock page from tests/mock_data/confluence/<page_id>.html and apply
+    the same parsing and compression logic as the real fetch_page_by_id.
+    """
+    d = _mock_confluence_dir()
+    path = d / f"{page_id}.html"
+    if not path.exists():
+        return (
+            f"[MOCK] Page {page_id} not found.\n"
+            f"Create {path} to add a mock page for this page ID."
+        )
+
+    html = path.read_text(encoding="utf-8")
+    # Extract title from <title> tag or fall back to page_id
+    title_m = re.search(r"<title>([^<]+)</title>", html, re.IGNORECASE)
+    title = title_m.group(1).strip() if title_m else f"Page {page_id}"
+    url = f"file://{path.resolve()}"
+
+    sections = _parse_html_sections(html)
+    raw_text_len = sum(len(s["content"]) for s in sections)
+
+    if raw_text_len <= _FULL_PAGE_THRESHOLD or not query:
+        full = _html_to_text(html)
+        return f"**{title}**\nURL: {url}\n\n{full}"
+    else:
+        compressed = _compress_page_content(sections, query, max_chars=8000)
+        return (
+            f"**{title}**\nURL: {url}\n\n"
+            "[Content compressed — query-guided section extraction applied]\n\n"
+            f"{compressed}"
+        )
+
+
+def _mock_fetch_confluence_page(query: str) -> str:
+    """
+    Simple keyword search across mock HTML files — returns up to 2 best matches.
+    Used as the CQL fallback when MOCK_CONFLUENCE=true.
+    """
+    d = _mock_confluence_dir()
+    if not d.exists():
+        return (
+            f"[MOCK] Mock Confluence directory not found: {d}\n"
+            "Create tests/mock_data/confluence/ with .html files."
+        )
+
+    query_terms = set(re.findall(r"\w+", query.lower())) - {
+        "the", "a", "an", "is", "are", "how", "what", "where", "to", "for",
+        "of", "in", "do", "i", "my", "can", "get", "set", "use", "with"
+    }
+
+    scored: list[tuple[float, Path, str]] = []
+    for path in sorted(d.glob("*.html")):
+        html = path.read_text(encoding="utf-8", errors="ignore")
+        text = _html_to_text(html).lower()
+        title_m = re.search(r"<title>([^<]+)</title>", html, re.IGNORECASE)
+        title = title_m.group(1).strip() if title_m else path.stem
+        score = sum(1 for t in query_terms if t in text) / max(len(query_terms), 1)
+        if score > 0:
+            scored.append((score, path, title))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+
+    if not scored:
+        return (
+            f"[MOCK] No matching pages found for: '{query}'\n"
+            "The mock knowledge base may not contain information on this topic."
+        )
+
+    parts: list[str] = []
+    for _, path, title in scored[:2]:
+        html = path.read_text(encoding="utf-8", errors="ignore")
+        text = _html_to_text(html)
+        page_id = path.stem
+        url = f"file://{path.resolve()}"
+        if len(text) > 4000:
+            text = text[:4000] + "\n...[content truncated]"
+        parts.append(f"**{title}**\nURL: {url}\n\n{text}")
+
+    return "\n\n---\n\n".join(parts)
 
 # Minimum cosine-similarity score to include a result in page lookups.
 _RELEVANCE_THRESHOLD = 0.20
@@ -242,16 +333,121 @@ def _compress_page_content(sections: list[dict], query: str, max_chars: int = 80
 
 # ── Tool: find_confluence_page_ids ────────────────────────────────────────────
 
+def _extract_page_id(meta: dict) -> str:
+    """Extract page_id from chunk metadata — explicit field or parsed from URL."""
+    page_id = meta.get("page_id", "")
+    if not page_id:
+        url = meta.get("url", "")
+        m = re.search(r"pageId=(\d+)", url)
+        if m:
+            page_id = m.group(1)
+    return page_id
+
+
+def _vector_search_pages(query: str, candidate_k: int) -> tuple[list[str], dict[str, dict]]:
+    """
+    Run vector similarity search and group results by page_id.
+
+    Returns:
+        ranked_page_ids: page IDs sorted by best chunk score descending.
+        page_map:        dict mapping page_id → page info (title, url, best_score,
+                         best_chunk_text, matched_sections).
+    """
+    from langchain_core.documents import Document
+
+    store = _get_store()
+    results: list[tuple[Document, float]] = store.similarity_search_with_relevance_scores(
+        query, k=candidate_k
+    )
+
+    page_map: dict[str, dict] = {}
+
+    for doc, score in results:
+        if score < _RELEVANCE_THRESHOLD:
+            continue
+
+        meta = doc.metadata
+        page_id = _extract_page_id(meta)
+        if not page_id:
+            continue
+
+        section = meta.get("section", "")
+        title = meta.get("title", "Unknown")
+        url = meta.get("url", "")
+
+        if page_id not in page_map:
+            page_map[page_id] = {
+                "title": title,
+                "url": url,
+                "best_score": score,
+                "best_chunk_text": doc.page_content,
+                "matched_sections": [],
+            }
+        else:
+            if score > page_map[page_id]["best_score"]:
+                page_map[page_id]["best_score"] = score
+                page_map[page_id]["best_chunk_text"] = doc.page_content
+
+        if section and section not in page_map[page_id]["matched_sections"]:
+            if len(page_map[page_id]["matched_sections"]) < 5:
+                page_map[page_id]["matched_sections"].append(section)
+
+    ranked = sorted(page_map.keys(), key=lambda p: page_map[p]["best_score"], reverse=True)
+    return ranked, page_map
+
+
+def _bm25_search_pages(query: str, candidate_k: int, page_map: dict[str, dict]) -> list[str]:
+    """
+    Run BM25 keyword search and group results by page_id.
+
+    Augments page_map in-place with metadata for pages not already present
+    (pages found only by BM25, not by vector search).
+
+    Returns:
+        ranked_page_ids: page IDs sorted by best BM25 chunk score descending.
+    """
+    from framework.core.bm25_index import get_bm25_index
+
+    index = get_bm25_index()
+    if index is None:
+        return []
+
+    hits = index.search(query, top_k=candidate_k)
+    page_scores: dict[str, float] = {}
+
+    for doc_idx, score in hits:
+        meta = index.get_metadata(doc_idx)
+        page_id = meta.get("page_id", "")
+        if not page_id:
+            continue
+
+        if page_id not in page_scores or score > page_scores[page_id]:
+            page_scores[page_id] = score
+
+        # Add to page_map if not yet present (BM25-only hit)
+        if page_id not in page_map:
+            page_map[page_id] = {
+                "title": meta.get("title", "Unknown"),
+                "url": meta.get("url", ""),
+                "best_score": score,
+                "best_chunk_text": index.get_document(doc_idx),
+                "matched_sections": [meta.get("section", "")] if meta.get("section") else [],
+            }
+
+    return sorted(page_scores.keys(), key=lambda p: page_scores[p], reverse=True)
+
+
 def find_confluence_page_ids(query: str, top_k: int = 5) -> str:
     """
     Search the Chroma knowledge base for Confluence pages relevant to the query.
 
-    Uses vector similarity search to identify which pages contain content
-    matching the query. Returns page IDs, titles, relevance scores, and the
-    section names that matched — NOT the chunk text itself.
+    Retrieval pipeline (layers enabled via env vars):
+      1. Vector similarity search (always active)
+      2. BM25 keyword search + RRF merge  (ENABLE_BM25=true)
+      3. Cross-encoder reranking          (RERANKER_PROVIDER != none)
 
-    The page IDs returned should be passed to fetch_page_by_id to retrieve
-    full page content for answering the user's question.
+    Returns page IDs, titles, relevance scores, and matched section names —
+    NOT the chunk text itself.  Pass the returned page IDs to fetch_page_by_id.
 
     Args:
         query:  Natural-language question or search phrase.
@@ -262,88 +458,121 @@ def find_confluence_page_ids(query: str, top_k: int = 5) -> str:
         the relevance threshold, with a suggestion to use fetch_confluence_page.
     """
     try:
-        store = _get_store()
+        store = _get_store()  # noqa: F841 — validates store is accessible
     except Exception as exc:
         return (
             f"[find_confluence_page_ids] Vector store unavailable: {exc}\n"
             "Run scripts/ingest_confluence.py to populate the knowledge base."
         )
 
+    # Determine candidate pool size — fetch more when reranker will narrow it down
+    candidate_k = (
+        config.RERANKER_CANDIDATE_K
+        if config.RERANKER_PROVIDER.lower() != "none"
+        else top_k * 6
+    )
+    # Always fetch at least top_k * 4 vector candidates for adequate recall
+    vector_fetch_k = max(candidate_k * 4, top_k * 4)
+
     try:
-        from langchain_core.documents import Document
-        results: list[tuple[Document, float]] = store.similarity_search_with_relevance_scores(
-            query, k=top_k * 4
-        )
+        vector_ranked, page_map = _vector_search_pages(query, vector_fetch_k)
     except Exception as exc:
-        return f"[find_confluence_page_ids] Search failed: {exc}"
+        return f"[find_confluence_page_ids] Vector search failed: {exc}"
 
-    # Filter by relevance threshold
-    relevant = [(doc, score) for doc, score in results if score >= _RELEVANCE_THRESHOLD]
+    # ── BM25 + RRF ────────────────────────────────────────────────────────────
+    if config.ENABLE_BM25:
+        try:
+            bm25_ranked = _bm25_search_pages(query, vector_fetch_k, page_map)
+        except Exception as exc:
+            print(f"[confluence] BM25 search failed: {exc}. Using vector-only ranking.")
+            bm25_ranked = []
 
-    if not relevant:
+        if bm25_ranked:
+            from framework.core.bm25_index import rrf_merge
+            merged = rrf_merge([vector_ranked, bm25_ranked], k=config.RRF_K)
+        else:
+            merged = vector_ranked
+    else:
+        merged = vector_ranked
+
+    if not merged:
         return (
-            f"[NO PAGES FOUND] No relevant pages found in the vector store for: '{query}'\n"
+            f"[NO PAGES FOUND] No relevant pages found in the knowledge base for: '{query}'\n"
             "Suggestion: call fetch_confluence_page with the same query to search "
             "Confluence directly via CQL."
         )
 
-    # Group by page_id
-    page_map: dict[str, dict] = {}
+    # ── Reranker ──────────────────────────────────────────────────────────────
+    if config.RERANKER_PROVIDER.lower() != "none":
+        candidates = merged[:candidate_k]
+        doc_texts = [page_map[p]["best_chunk_text"] for p in candidates]
+        try:
+            from framework.core.reranker import get_reranker
+            reranker = get_reranker()
+            reranked_indices = reranker.rerank(query, doc_texts, top_n=top_k)
+            top_pages = [candidates[i] for i in reranked_indices]
+        except Exception as exc:
+            print(f"[confluence] Reranker failed: {exc}. Falling back to RRF/vector ranking.")
+            top_pages = candidates[:top_k]
+    else:
+        top_pages = merged[:top_k]
 
-    for doc, score in relevant:
-        meta = doc.metadata
-
-        # Extract page_id from metadata or parse from URL
-        page_id = meta.get("page_id", "")
-        if not page_id:
-            url = meta.get("url", "")
-            m = re.search(r"pageId=(\d+)", url)
-            if m:
-                page_id = m.group(1)
-
-        if not page_id:
-            continue  # skip results with no identifiable page_id
-
-        section = meta.get("section", "")
-        title = meta.get("title", "Unknown")
-        url = meta.get("url", "")
-
-        if page_id not in page_map:
-            page_map[page_id] = {
-                "page_id": page_id,
-                "title": title,
-                "url": url,
-                "best_score": score,
-                "matched_sections": [],
-            }
-        else:
-            if score > page_map[page_id]["best_score"]:
-                page_map[page_id]["best_score"] = score
-
-        if section and section not in page_map[page_id]["matched_sections"]:
-            if len(page_map[page_id]["matched_sections"]) < 5:
-                page_map[page_id]["matched_sections"].append(section)
-
-    if not page_map:
+    if not top_pages:
         return (
             f"[NO PAGES FOUND] Chunks were found but none had a resolvable page ID "
             f"for query: '{query}'\n"
             "Suggestion: call fetch_confluence_page with the same query."
         )
 
-    # Sort by best_score descending, return top_k
-    sorted_pages = sorted(page_map.values(), key=lambda p: p["best_score"], reverse=True)
-    top_pages = sorted_pages[:top_k]
-
     lines = ["PAGE_RESULTS:"]
-    for p in top_pages:
-        sections_label = ", ".join(p["matched_sections"]) if p["matched_sections"] else ""
+    for pid in top_pages:
+        info = page_map[pid]
+        sections_label = ", ".join(info["matched_sections"]) if info["matched_sections"] else ""
         lines.append(
-            f'page_id={p["page_id"]} | title="{p["title"]}" | '
-            f'score={p["best_score"]:.2f} | matched_sections=[{sections_label}]'
+            f'page_id={pid} | title="{info["title"]}" | '
+            f'score={info["best_score"]:.2f} | matched_sections=[{sections_label}]'
         )
 
     return "\n".join(lines)
+
+
+# ── Page content cache ────────────────────────────────────────────────────────
+
+
+def _page_cache_path(page_id: str) -> Path:
+    cache_dir = Path(config.PAGE_CACHE_DIR)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    return cache_dir / f"{page_id}.json"
+
+
+def _load_page_cache(page_id: str) -> dict | None:
+    """Return the cached entry for *page_id*, or None if it does not exist."""
+    path = _page_cache_path(page_id)
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def _save_page_cache(
+    page_id: str, title: str, url: str, html: str, confluence_version: int
+) -> None:
+    """Write a cache entry to disk using an atomic rename so reads never see
+    a partially-written file."""
+    data = {
+        "page_id": page_id,
+        "title": title,
+        "url": url,
+        "html": html,
+        "confluence_version": confluence_version,
+        "cached_at": datetime.now(timezone.utc).isoformat(),
+    }
+    path = _page_cache_path(page_id)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    tmp.rename(path)
 
 
 # ── Tool: fetch_page_by_id ────────────────────────────────────────────────────
@@ -368,6 +597,9 @@ def fetch_page_by_id(page_id: str, query: str = "") -> str:
     Returns:
         Formatted string: title, URL, optional compression notice, content.
     """
+    if config.MOCK_CONFLUENCE:
+        return _mock_fetch_page_by_id(page_id, query)
+
     try:
         from atlassian import Confluence
     except ImportError:
@@ -389,14 +621,48 @@ def fetch_page_by_id(page_id: str, query: str = "") -> str:
             cloud=False,
         )
 
-        page = cf.get_page_by_id(page_id, expand="body.storage")
+        # ── Cache lookup ────────────────────────────────────────────────────────
+        # Strategy:
+        #   • Cache fresh (< TTL) AND Confluence version unchanged → serve cache
+        #   • Cache fresh but Confluence version changed → full fetch + update cache
+        #   • Cache stale (≥ TTL) or missing → full fetch + update cache
+        ttl_seconds = config.PAGE_CACHE_TTL_HOURS * 3600
+        now = datetime.now(timezone.utc)
+        cached = _load_page_cache(page_id)
+        html = title = url = None
+        confluence_version = 0
 
-        title = page.get("title", "Untitled")
-        base = config.CONFLUENCE_URL.rstrip("/")
-        url = f"{base}/pages/viewpage.action?pageId={page_id}"
+        if cached:
+            cached_at = datetime.fromisoformat(cached["cached_at"])
+            age_seconds = (now - cached_at).total_seconds()
 
-        html = page.get("body", {}).get("storage", {}).get("value", "")
+            if age_seconds < ttl_seconds:
+                # Cache is within TTL — do a lightweight version check.
+                # expand="version" fetches only metadata, not the HTML body.
+                version_resp = cf.get_page_by_id(page_id, expand="version")
+                current_version = (
+                    (version_resp or {}).get("version", {}).get("number", 0)
+                )
+                if current_version == cached["confluence_version"]:
+                    # Page unchanged: serve from cache; skip full fetch.
+                    html = cached["html"]
+                    title = cached["title"]
+                    url = cached["url"]
+                    confluence_version = current_version
 
+        if html is None:
+            # Cache miss, stale, or Confluence page updated — fetch full content.
+            page = cf.get_page_by_id(page_id, expand="body.storage,version")
+
+            title = page.get("title", "Untitled")
+            base = config.CONFLUENCE_URL.rstrip("/")
+            url = f"{base}/pages/viewpage.action?pageId={page_id}"
+            html = page.get("body", {}).get("storage", {}).get("value", "")
+            confluence_version = (page.get("version") or {}).get("number", 0)
+
+            _save_page_cache(page_id, title, url, html, confluence_version)
+
+        # ── Content rendering ───────────────────────────────────────────────────
         if not html:
             return f"**{title}**\nURL: {url}\n\n(No content available)"
 
@@ -437,6 +703,9 @@ def fetch_confluence_page(query: str) -> str:
         each prefixed with the page title and its exact URL.
         Returns an error message if Confluence is unreachable or no pages match.
     """
+    if config.MOCK_CONFLUENCE:
+        return _mock_fetch_confluence_page(query)
+
     try:
         from atlassian import Confluence
     except ImportError:

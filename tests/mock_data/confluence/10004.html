@@ -1,0 +1,124 @@
+<html>
+<head><title>Kubernetes Cluster Access</title></head>
+<body>
+<h1>Kubernetes Cluster Access</h1>
+<p>We run three Kubernetes clusters: dev, staging, and production. This page explains how to get access, configure kubectl, and use the clusters safely. Production cluster access is restricted — read the access controls section carefully before requesting access.</p>
+
+<h2>Requesting Access</h2>
+<p>Submit an access request via the IT Service Desk with the following information: your name, team, manager, the cluster(s) you need access to, and the justification. Standard processing time is 1 business day for dev/staging and 3 business days for production.</p>
+<p>Access levels available:</p>
+<ul>
+<li><strong>read-only</strong> — View pods, logs, events, services, configmaps. Cannot modify anything. Default for all developers.</li>
+<li><strong>developer</strong> — read-only plus: port-forward, exec into pods, scale deployments in your team's namespace. Standard for most developers.</li>
+<li><strong>namespace-admin</strong> — Full control within your team's namespace. For team leads. Requires manager and VP approval.</li>
+<li><strong>cluster-admin</strong> — Full cluster access. Platform team only. Not available to application developers under any circumstances.</li>
+</ul>
+
+<h2>Configuring kubectl</h2>
+<p>We use AWS EKS for all clusters. Authentication uses AWS SSO — you must complete AWS CLI setup first (see Developer Onboarding Guide). Once you have AWS access, fetch the kubeconfig for each cluster.</p>
+<h3>Getting the Kubeconfig</h3>
+<pre>
+# Dev cluster
+aws eks update-kubeconfig --name acme-dev --region eu-west-1 --profile acme-dev
+
+# Staging cluster
+aws eks update-kubeconfig --name acme-staging --region eu-west-1 --profile acme-staging
+
+# Production cluster (requires production AWS access)
+aws eks update-kubeconfig --name acme-prod --region eu-west-1 --profile acme-prod
+</pre>
+<p>After running these commands, your <code>~/.kube/config</code> will have three contexts. Verify with <code>kubectl config get-contexts</code>.</p>
+<h3>Switching Between Clusters</h3>
+<p>Always verify which cluster you are connected to before running any command, especially before any mutating operation.</p>
+<pre>
+# See current context
+kubectl config current-context
+
+# Switch to dev
+kubectl config use-context arn:aws:eks:eu-west-1:123456789:cluster/acme-dev
+
+# Switch to staging
+kubectl config use-context arn:aws:eks:eu-west-1:123456789:cluster/acme-staging
+
+# Switch to production (use with extreme care)
+kubectl config use-context arn:aws:eks:eu-west-1:123456789:cluster/acme-prod
+</pre>
+<p>Install <code>kubectx</code> for easier context switching: <code>brew install kubectx</code>. This gives you <code>kubectx dev</code>, <code>kubectx staging</code> shortcuts.</p>
+
+<h2>Namespaces and Team Organisation</h2>
+<p>Each team has its own namespace in each cluster. The naming convention is <code>team-environment</code>. For example, the backend team's namespaces are <code>backend-dev</code>, <code>backend-staging</code>, and <code>backend-prod</code>. Your RBAC role only grants access within your team's namespaces — you cannot read other teams' secrets or configmaps.</p>
+<p>System namespaces (kube-system, monitoring, logging, ingress-nginx) are read-only for all developers. Contact the platform team for changes to these.</p>
+
+<h2>Common kubectl Commands</h2>
+<p>These are the commands you will use most often day-to-day.</p>
+<h3>Viewing Resources</h3>
+<pre>
+# List pods in your namespace
+kubectl get pods -n backend-dev
+
+# Get pod details (including events and conditions)
+kubectl describe pod myapp-6b7d9c8f4-xjk2p -n backend-dev
+
+# Watch pod status in real time
+kubectl get pods -n backend-dev -w
+
+# Get resource usage (requires metrics-server)
+kubectl top pods -n backend-dev
+</pre>
+<h3>Viewing Logs</h3>
+<pre>
+# Logs for a pod
+kubectl logs myapp-6b7d9c8f4-xjk2p -n backend-dev
+
+# Follow (stream) logs
+kubectl logs -f myapp-6b7d9c8f4-xjk2p -n backend-dev
+
+# Logs for all pods in a deployment (very useful)
+kubectl logs -f deployment/myapp -n backend-dev
+
+# Previous container logs (if pod crashed and restarted)
+kubectl logs myapp-6b7d9c8f4-xjk2p -n backend-dev --previous
+</pre>
+<h3>Port Forwarding</h3>
+<pre>
+# Forward local port 8080 to the pod's port 8080
+kubectl port-forward pod/myapp-6b7d9c8f4-xjk2p 8080:8080 -n backend-dev
+
+# Forward to the service (load-balanced across all pods)
+kubectl port-forward svc/myapp 8080:80 -n backend-dev
+</pre>
+<h3>Exec into a Pod</h3>
+<pre>
+# Open an interactive shell
+kubectl exec -it myapp-6b7d9c8f4-xjk2p -n backend-dev -- /bin/bash
+
+# Run a single command
+kubectl exec myapp-6b7d9c8f4-xjk2p -n backend-dev -- curl -s localhost:8080/actuator/health
+</pre>
+
+<h2>Debugging Pods</h2>
+<p>When a pod is not starting or is crash-looping, work through these steps in order.</p>
+<h3>Check Pod Status</h3>
+<p>Run <code>kubectl get pod &lt;name&gt; -n &lt;namespace&gt;</code>. The STATUS column tells you the current state. Common states:</p>
+<ul>
+<li><strong>Pending</strong> — Pod not scheduled yet. Usually means no node has enough resources, or a PVC is not bound.</li>
+<li><strong>ImagePullBackOff</strong> — Cannot pull the container image. Check that the image tag exists in the registry and the pull secret is configured.</li>
+<li><strong>CrashLoopBackOff</strong> — Container keeps crashing on startup. Check the logs with <code>--previous</code> flag to see the crash output.</li>
+<li><strong>OOMKilled</strong> — Out of memory. The container exceeded its memory limit. Increase the limit in the deployment manifest or find the memory leak.</li>
+</ul>
+<h3>Check Events</h3>
+<p>Kubernetes events contain detailed failure reasons that are not in the pod logs: <code>kubectl describe pod &lt;name&gt; -n &lt;namespace&gt;</code>. Scroll to the Events section at the bottom. Look for Warning events — they usually explain exactly what went wrong (e.g. "Insufficient memory", "Failed to pull image").</p>
+<h3>Check ConfigMaps and Secrets</h3>
+<p>Missing or misconfigured environment variables often cause startup crashes. Check what the pod sees: <code>kubectl exec &lt;pod&gt; -n &lt;ns&gt; -- env | sort</code>. Compare with the deployment's env section and the referenced configmaps and secrets.</p>
+
+<h2>Production Safety Rules</h2>
+<p>Violating these rules will result in access revocation regardless of role:</p>
+<ul>
+<li>Never delete a production pod manually unless explicitly instructed during an incident by the on-call lead.</li>
+<li>Never scale a production deployment to zero without a change ticket and approval.</li>
+<li>Never exec into a production pod and modify files or state — use code deployments.</li>
+<li>Do not read production secrets unless you have an approved need. Accessing secrets leaves an audit trail.</li>
+<li>Do not run load tests or resource-intensive jobs against production clusters.</li>
+</ul>
+</body>
+</html>

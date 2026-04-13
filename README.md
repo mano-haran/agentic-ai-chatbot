@@ -21,6 +21,8 @@ layer that lets you define workflows in plain YAML **or** Python — your choice
 11. [Adding a New Workflow (Step-by-Step)](#11-adding-a-new-workflow-step-by-step)
 12. [LLM Providers](#12-llm-providers)
 13. [Getting Started](#13-getting-started)
+14. [Testing with Mock Data](#14-testing-with-mock-data)
+15. [RAG Strategy Configuration](#15-rag-strategy-configuration)
 
 ---
 
@@ -1077,3 +1079,373 @@ Open [http://localhost:8000](http://localhost:8000) and ask:
 | `pydantic` | YAML schema validation |
 | `pyyaml` | YAML file parsing |
 | `python-dotenv` | Load `.env` file |
+
+---
+
+## 14. Testing with Mock Data
+
+Both workflows ship with realistic mock data so you can run and test the full end-to-end AI pipeline without a real Jenkins server or Confluence instance. All you need is a valid LLM API key.
+
+### Mock Data Overview
+
+```
+tests/mock_data/
+├── jenkins/
+│   ├── builds.json          ← 5 builds; #143 and #142 are FAILURE
+│   ├── build_142_log.txt    ← Scenario A: Maven compilation failure
+│   ├── build_142_info.json  ← Build #142 metadata (branch, author, changed files)
+│   ├── build_143_log.txt    ← Scenario B: JUnit test failures
+│   └── build_143_info.json  ← Build #143 metadata (test result counts)
+└── confluence/
+    ├── 10001.html           ← Developer Onboarding Guide
+    ├── 10002.html           ← Production Deployment Process
+    ├── 10003.html           ← Jenkins Setup and Configuration
+    ├── 10004.html           ← Kubernetes Cluster Access
+    ├── 10005.html           ← Incident Response Runbook
+    └── 10006.html           ← Code Review and Pull Request Guidelines
+```
+
+**Jenkins scenarios:**
+| Build | Failure type | Key details |
+|---|---|---|
+| #142 | Maven compilation error | 3 symbol-not-found errors across UserService and OrderService |
+| #143 | JUnit test failure | 2 of 41 tests failed — email notification + audit log assertions |
+
+**Confluence pages:**
+Each page is >4 000 characters of content, long enough to trigger query-guided section compression. Topics span the full DevOps knowledge area, providing variety for testing retrieval ranking and reranking.
+
+---
+
+### Testing the Jenkins Workflow
+
+#### Step 1 — Enable mock mode
+
+Add to your `.env`:
+```env
+MOCK_JENKINS=true
+```
+
+#### Step 2 — Start the app
+
+```bash
+chainlit run app.py
+```
+
+#### Step 3 — Test Scenario A: Compilation failure (build #142)
+
+In the chat, type:
+> `switch to jenkins`
+
+Then paste a build URL (the mock tools accept any URL format):
+> `http://mock-jenkins/job/MyApp/142/`
+
+Expected result: the pipeline fetches mock build log #142, identifies the compilation error in `UserService.java` and `OrderService.java`, and provides specific fix suggestions.
+
+#### Step 4 — Test Scenario B: Test failure (build #143)
+
+> `http://mock-jenkins/job/MyApp/143/`
+
+Expected result: the pipeline detects the 2 JUnit test failures (email notification and audit log assertions) and suggests fixes targeting `UserService.java` and `NotificationService.java`.
+
+#### Step 5 — Test with a Job URL (auto-selects most recent failure)
+
+> `http://mock-jenkins/job/MyApp/`
+
+Expected result: `get_jenkins_builds` returns 5 builds; the agent picks build #143 (most recent FAILURE) and analyses it.
+
+#### Step 6 — Test with pasted log text (no URL)
+
+Copy any content from `tests/mock_data/jenkins/build_142_log.txt` and paste it directly into the chat. The agent should handle it as a "Case C — pasted log" without calling any tools.
+
+#### Step 7 — Test follow-up questions
+
+After an analysis, ask a follow-up:
+> `Which file needs to be changed to fix the compilation error?`
+
+Expected result: the agent answers from session context without calling any tools again.
+
+---
+
+### Testing the DevOps KB Search Workflow
+
+#### Step 1 — Ingest mock Confluence pages into Chroma
+
+The vector search tool reads from Chroma. You need to ingest the mock HTML files once:
+
+```bash
+# Install dependencies (if not already installed)
+pip install chromadb langchain-chroma beautifulsoup4
+
+# Ingest mock pages (uses html chunking by default)
+python scripts/ingest_confluence.py --dir tests/mock_data/confluence/ --reset
+
+# Optional: also build the BM25 index for hybrid retrieval testing
+ENABLE_BM25=true python scripts/ingest_confluence.py --dir tests/mock_data/confluence/ --reset
+```
+
+You should see output like:
+```
+[ingest] found 42 chunks from tests/mock_data/confluence/
+[ingest] total chunks to embed: 42 (chunking_strategy=html)
+[ingest] embedded 42 / 42 chunks
+[ingest] done — 42 chunks stored in data/chroma (collection: confluence)
+[bm25] index saved → data/bm25.pkl (42 documents)
+```
+
+#### Step 2 — Enable mock mode
+
+Add to your `.env`:
+```env
+MOCK_CONFLUENCE=true
+```
+
+This makes `fetch_page_by_id` read from `tests/mock_data/confluence/` instead of calling the Confluence API. The vector search (`find_confluence_page_ids`) continues to use Chroma as normal.
+
+#### Step 3 — Start the app
+
+```bash
+chainlit run app.py
+```
+
+#### Step 4 — Test retrieval and answers
+
+Switch to the KB search workflow:
+> `switch to confluence`
+
+Then ask questions that map to different mock pages:
+
+| Question | Expected top page |
+|---|---|
+| `How do I onboard a new developer?` | 10001 — Developer Onboarding Guide |
+| `What is the production deployment process?` | 10002 — Production Deployment Process |
+| `How do I set up Jenkins credentials?` | 10003 — Jenkins Setup and Configuration |
+| `How do I access the Kubernetes cluster?` | 10004 — Kubernetes Cluster Access |
+| `What should I do during an incident?` | 10005 — Incident Response Runbook |
+| `What are the code review requirements?` | 10006 — Code Review Guidelines |
+
+#### Step 5 — Test section compression
+
+Ask about a page with many sections (all 6 pages qualify). The answer agent's response will include `[Content compressed — query-guided section extraction applied]` since every mock page exceeds 4 000 characters. You can then ask follow-up questions about specific sections.
+
+#### Step 6 — Test follow-up Q&A (zero re-fetch)
+
+After the first answer:
+> `What is the rollback procedure?` *(after asking about the deployment process)*
+
+Expected: the agent answers from the page already in context without calling any tools.
+
+#### Step 7 — Test the CQL fallback
+
+Ask about something not in the vector store:
+> `How do I configure the VPN?`
+
+Expected: `find_confluence_page_ids` returns `[NO PAGES FOUND]`, then `fetch_confluence_page` is called — in mock mode, it does a keyword search across the mock HTML files and returns the best match (or states nothing was found).
+
+---
+
+### Testing the RAG Pipeline (BM25 + Reranker)
+
+#### Test BM25 hybrid retrieval
+
+```env
+ENABLE_BM25=true
+BM25_INDEX_PATH=data/bm25.pkl
+```
+
+Re-ingest to build the BM25 index if not done yet, then restart the app. BM25 should boost exact keyword matches — for example, "JENKINS_HOME variable" should find page 10003 even if the embedding similarity is lower.
+
+#### Test reranking (openai_compatible)
+
+If you have a local reranker (e.g. mxbai-rerank-large-v1 on Ollama or vLLM):
+```env
+RERANKER_PROVIDER=openai_compatible
+RERANKER_BASE_URL=http://localhost:11434   # or your gateway URL
+RERANKER_MODEL=mxbai-rerank-large-v1
+RERANKER_CANDIDATE_K=10
+RERANKER_TOP_N=3
+```
+
+Ask a targeted query and observe whether the reranker promotes a more precise page over a semantically similar but less precise one. For example:
+> `How do I run smoke tests after deploying?`
+
+Without reranking: page 10003 (Jenkins) may rank higher due to embedding similarity.
+With reranking: page 10002 (Deployment Process) should rank first since it explicitly describes running smoke tests post-deployment.
+
+---
+
+### Adding More Mock Scenarios
+
+**New Jenkins scenario**: Create `tests/mock_data/jenkins/build_144_log.txt` and `build_144_info.json` following the same format. The mock tools automatically serve any build number that has a corresponding file.
+
+**New Confluence page**: Create `tests/mock_data/confluence/10007.html` with valid HTML and a `<title>` tag. Re-run the ingest command and restart the app. The new page is immediately searchable.
+
+---
+
+## 15. RAG Strategy Configuration
+
+The DevOps Knowledgebase workflow uses a layered RAG pipeline. Each layer is independently optional and enabled via environment variables. All layers are air-gapped safe.
+
+### Layer 0 — Vector Search (always active)
+
+No configuration needed.  Chroma stores embeddings produced during ingestion.  Query time: cosine similarity search.
+
+```bash
+# Ingest (baseline — always required)
+python scripts/ingest_confluence.py --space DEV
+```
+
+---
+
+### Layer 1 — Context-Aware Chunking (Docling)
+
+Improves chunk quality: tables stay intact, code blocks are atomic, every chunk carries heading breadcrumbs.
+
+**Install**:
+```bash
+pip install 'docling>=2.0.0'
+```
+
+**Configure** (`.env`):
+```env
+CHUNKING_STRATEGY=docling
+```
+
+**Air-gapped**: Docling's HTML backend needs no ML models for conversion. The `HybridChunker` uses a tokenizer — point it to a local directory:
+```env
+DOCLING_TOKENIZER_MODEL=models/all-MiniLM-L6-v2
+TRANSFORMERS_OFFLINE=1
+HF_DATASETS_OFFLINE=1
+```
+
+**Re-ingest** after enabling:
+```bash
+python scripts/ingest_confluence.py --space DEV --reset
+```
+
+---
+
+### Layer 2 — BM25 Hybrid Retrieval + RRF
+
+Adds keyword recall alongside vector semantic search.  Results are merged using Reciprocal Rank Fusion (RRF).
+
+**Install**:
+```bash
+pip install rank-bm25
+```
+
+**Configure** (`.env`):
+```env
+ENABLE_BM25=true
+BM25_INDEX_PATH=data/bm25.pkl   # default
+RRF_K=60                         # default; lower = rank position matters more
+```
+
+**Re-ingest** to build the BM25 index (created alongside the Chroma store):
+```bash
+python scripts/ingest_confluence.py --space DEV
+```
+
+The BM25 index is saved to `data/bm25.pkl` and loaded lazily at first query.
+
+> **Note**: `rank_bm25` is pure Python — no network access, no ML models.  Fully air-gapped.
+
+---
+
+### Layer 3 — Cross-Encoder Reranking
+
+Reranks candidate pages using a cross-encoder model that sees (query, document) jointly — significantly more accurate than bi-encoder scoring.
+
+#### Option A — OpenAI-compatible endpoint (recommended)
+
+Use when you have an internal model server (vLLM, Infinity, or similar) serving a reranking model such as `mxbai-rerank-large-v1`.
+
+**Install**:
+```bash
+pip install httpx   # already in requirements.txt
+```
+
+**Configure** (`.env`):
+```env
+RERANKER_PROVIDER=openai_compatible
+RERANKER_BASE_URL=https://your-gateway.internal    # base URL (without /v1/rerank)
+RERANKER_API_KEY=your-api-key                      # omit if no auth required
+RERANKER_MODEL=mxbai-rerank-large-v1
+RERANKER_CANDIDATE_K=30    # pages sent to reranker
+RERANKER_TOP_N=5           # pages returned after reranking
+```
+
+> Only your internal gateway needs to be reachable — no internet access required.
+
+#### Option B — Local CrossEncoder (fully air-gapped)
+
+Use when no internal reranker API is available.  Runs the cross-encoder in-process using `sentence-transformers`.
+
+**Install**:
+```bash
+pip install sentence-transformers
+```
+
+**Download model** (do this once, on a machine with internet access, then copy to the air-gapped server):
+```bash
+# On internet-connected machine:
+pip install huggingface_hub
+huggingface-cli download mixedbread-ai/mxbai-rerank-large-v1 \
+    --local-dir models/mxbai-rerank-large-v1
+```
+
+**Configure** (`.env`):
+```env
+RERANKER_PROVIDER=local
+RERANKER_LOCAL_MODEL=models/mxbai-rerank-large-v1
+TRANSFORMERS_OFFLINE=1
+HF_DATASETS_OFFLINE=1
+RERANKER_CANDIDATE_K=30
+RERANKER_TOP_N=5
+```
+
+---
+
+### Full Stack (Maximum Accuracy)
+
+The recommended configuration for the highest retrieval accuracy in an air-gapped environment:
+
+```env
+# Chunking
+CHUNKING_STRATEGY=docling
+DOCLING_TOKENIZER_MODEL=models/all-MiniLM-L6-v2
+
+# Hybrid retrieval
+ENABLE_BM25=true
+BM25_INDEX_PATH=data/bm25.pkl
+RRF_K=60
+
+# Reranking (choose one)
+RERANKER_PROVIDER=openai_compatible
+RERANKER_BASE_URL=https://your-gateway.internal
+RERANKER_MODEL=mxbai-rerank-large-v1
+RERANKER_CANDIDATE_K=30
+RERANKER_TOP_N=5
+
+# Air-gapped
+TRANSFORMERS_OFFLINE=1
+HF_DATASETS_OFFLINE=1
+```
+
+**Ingest sequence** (first time or after configuration change):
+```bash
+pip install 'docling>=2.0.0' rank-bm25
+python scripts/ingest_confluence.py --space DEV --reset
+```
+
+---
+
+### RAG Strategy Comparison
+
+| Strategy | Recall | Precision | Latency | Dependencies |
+|---|---|---|---|---|
+| Vector only (default) | Good | Good | Fast | None |
+| + BM25 (Layer 2) | Better | Good | Fast | `rank-bm25` |
+| + Reranker (Layer 3) | Good | Best | +200–500 ms | `httpx` or `sentence-transformers` |
+| All layers | Best | Best | +200–500 ms | All of the above |
+
+> **Incremental adoption**: Each layer is independently useful.  Start with BM25 (zero query latency cost) and add reranking when precision matters most.
