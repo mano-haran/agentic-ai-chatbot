@@ -102,8 +102,14 @@ MOCK_DATA_DIR: str = os.getenv("MOCK_DATA_DIR", "tests/mock_data")
 #   html     — BeautifulSoup heading-based sections (default, no extra deps)
 #   docling  — docling HybridChunker: context-aware, tables/code as atomic units
 CHUNKING_STRATEGY: str = os.getenv("CHUNKING_STRATEGY", "html")
+# Tokenizer provider for docling HybridChunker:
+#   local             — load a local HuggingFace tokenizer from DOCLING_TOKENIZER_MODEL path (default)
+#   openai_compatible — use tiktoken (bundled with langchain-openai); token counts match
+#                       OpenAI embedding/LLM context limits; no local model files needed
+DOCLING_TOKENIZER_PROVIDER: str = os.getenv("DOCLING_TOKENIZER_PROVIDER", "local")
 # Local tokenizer path for docling HybridChunker.  Leave empty to use docling's
 # default; set to a local model directory for air-gapped environments.
+# Only used when DOCLING_TOKENIZER_PROVIDER=local.
 DOCLING_TOKENIZER_MODEL: str = os.getenv("DOCLING_TOKENIZER_MODEL", "")
 
 # BM25 hybrid retrieval — adds keyword search alongside vector search.

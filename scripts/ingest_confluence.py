@@ -30,8 +30,9 @@ Environment variables (set in .env):
   CHROMA_COLLECTION    Collection name (default: confluence)
   EMBEDDING_PROVIDER   local | openai  (default: local)
   EMBEDDING_MODEL      Model name override
-  CHUNKING_STRATEGY    html (default) | docling
-  DOCLING_TOKENIZER_MODEL  Local tokenizer path for docling (air-gapped)
+  CHUNKING_STRATEGY         html (default) | docling
+  DOCLING_TOKENIZER_PROVIDER  local (default) | openai_compatible
+  DOCLING_TOKENIZER_MODEL   Local tokenizer path for docling (air-gapped, used when provider=local)
   ENABLE_BM25          true | false (default: false)
   BM25_INDEX_PATH      Path to save BM25 index (default: data/bm25.pkl)
 """
@@ -54,6 +55,60 @@ from framework.core.embeddings import get_embeddings
 
 
 # ── Docling chunking ───────────────────────────────────────────────────────────
+
+class _TiktokenWrapper:
+    """Wraps tiktoken to satisfy docling's HybridChunker tokenizer interface.
+
+    Tiktoken is bundled with langchain-openai and uses the same byte-pair
+    encoding as OpenAI's API, so chunk token counts stay consistent with
+    OpenAI embedding and LLM context limits.
+
+    Used when DOCLING_TOKENIZER_PROVIDER=openai_compatible.
+    """
+
+    def __init__(self, model_name: str = "text-embedding-3-small") -> None:
+        try:
+            import tiktoken
+        except ImportError as exc:
+            raise ImportError(
+                "tiktoken is required for DOCLING_TOKENIZER_PROVIDER=openai_compatible. "
+                "It is bundled with langchain-openai: pip install langchain-openai"
+            ) from exc
+
+        try:
+            self._enc = tiktoken.encoding_for_model(model_name)
+        except KeyError:
+            # Unknown model name — fall back to the encoding used by most OpenAI models
+            self._enc = tiktoken.get_encoding("cl100k_base")
+
+        # HybridChunker reads .model_max_length to cap chunk size.
+        # 8 191 is the context limit for text-embedding-3-small / text-embedding-ada-002.
+        self.model_max_length: int = 8191
+
+    def encode(self, text: str, **kwargs) -> list[int]:  # noqa: ARG002
+        return self._enc.encode(text)
+
+    def decode(self, token_ids: list[int], **kwargs) -> str:  # noqa: ARG002
+        return self._enc.decode(token_ids)
+
+
+def _build_docling_tokenizer():
+    """Return the tokenizer (or path string) to pass to HybridChunker.
+
+    - provider=local            → path string from DOCLING_TOKENIZER_MODEL, or None
+                                  (None means docling uses its own default tokenizer)
+    - provider=openai_compatible → _TiktokenWrapper instance using the same encoding
+                                  as EMBEDDING_MODEL (or text-embedding-3-small)
+    """
+    provider = config.DOCLING_TOKENIZER_PROVIDER
+
+    if provider == "openai_compatible":
+        model_name = config.EMBEDDING_MODEL or "text-embedding-3-small"
+        return _TiktokenWrapper(model_name=model_name)
+
+    # Default: local path (may be empty → None → docling uses its own default)
+    return config.DOCLING_TOKENIZER_MODEL or None
+
 
 def _docling_to_chunks(html: str, title: str, url: str, page_id: str) -> list[dict]:
     """
@@ -104,12 +159,14 @@ def _docling_to_chunks(html: str, title: str, url: str, page_id: str) -> list[di
         result = converter.convert(tmp_path)
         dl_doc = result.document
 
-        # HybridChunker: use a local tokenizer path when set (air-gapped)
-        tokenizer_path = config.DOCLING_TOKENIZER_MODEL
+        # HybridChunker: build the tokenizer based on DOCLING_TOKENIZER_PROVIDER.
+        # - local            → path string (air-gapped HuggingFace model) or None
+        # - openai_compatible → _TiktokenWrapper (tiktoken, no local model needed)
+        tokenizer = _build_docling_tokenizer()
         try:
             chunker = (
-                HybridChunker(tokenizer=tokenizer_path)
-                if tokenizer_path
+                HybridChunker(tokenizer=tokenizer)
+                if tokenizer is not None
                 else HybridChunker()
             )
         except TypeError:
