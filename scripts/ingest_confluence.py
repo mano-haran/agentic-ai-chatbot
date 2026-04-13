@@ -78,22 +78,50 @@ def _make_tiktoken_wrapper_class():
             "It is bundled with langchain-openai: pip install langchain-openai"
         ) from exc
 
-    # Probe known locations for BaseTokenizer across docling / docling-core versions.
+    # Strategy 1: introspect HybridChunker's 'tokenizer' field annotation directly.
+    # This guarantees we inherit from the *exact* class object that Pydantic will
+    # validate against, regardless of which module path docling uses internally.
+    import typing as _typing
     _DoclingBase = None
-    for _mod_path, _attr in [
-        ("docling_core.transforms.chunker.tokenizer_utils", "BaseTokenizer"),
-        ("docling_core.transforms.chunker",                 "BaseTokenizer"),
-        ("docling.chunking",                                "BaseTokenizer"),
-    ]:
-        try:
-            import importlib
-            _mod = importlib.import_module(_mod_path)
-            _candidate = getattr(_mod, _attr, None)
-            if _candidate is not None:
-                _DoclingBase = _candidate
-                break
-        except ImportError:
-            continue
+    try:
+        from docling.chunking import HybridChunker as _HC
+        _ann = None
+        if hasattr(_HC, "model_fields"):          # Pydantic v2
+            _f = _HC.model_fields.get("tokenizer")
+            if _f is not None:
+                _ann = _f.annotation
+        elif hasattr(_HC, "__fields__"):          # Pydantic v1
+            _f = _HC.__fields__.get("tokenizer")
+            if _f is not None:
+                _ann = getattr(_f, "outer_type_", None)
+        if _ann is not None:
+            _origin = _typing.get_origin(_ann)
+            if _origin is _typing.Union:
+                for _arg in _typing.get_args(_ann):
+                    if _arg is not type(None) and isinstance(_arg, type):
+                        _DoclingBase = _arg
+                        break
+            elif isinstance(_ann, type):
+                _DoclingBase = _ann
+    except Exception:
+        pass
+
+    # Strategy 2: probe known module paths for BaseTokenizer (fallback).
+    if _DoclingBase is None:
+        import importlib
+        for _mod_path, _attr in [
+            ("docling_core.transforms.chunker.tokenizer_utils", "BaseTokenizer"),
+            ("docling_core.transforms.chunker",                 "BaseTokenizer"),
+            ("docling.chunking",                                "BaseTokenizer"),
+        ]:
+            try:
+                _mod = importlib.import_module(_mod_path)
+                _candidate = getattr(_mod, _attr, None)
+                if _candidate is not None:
+                    _DoclingBase = _candidate
+                    break
+            except ImportError:
+                continue
 
     if _DoclingBase is not None:
         # Pydantic-aware subclass — satisfies HybridChunker's type validator.
