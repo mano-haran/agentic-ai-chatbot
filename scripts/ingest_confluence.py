@@ -56,40 +56,109 @@ from framework.core.embeddings import get_embeddings
 
 # ── Docling chunking ───────────────────────────────────────────────────────────
 
-class _TiktokenWrapper:
-    """Wraps tiktoken to satisfy docling's HybridChunker tokenizer interface.
+def _make_tiktoken_wrapper_class():
+    """Build a TiktokenWrapper class that properly subclasses docling's BaseTokenizer.
 
-    Tiktoken is bundled with langchain-openai and uses the same byte-pair
-    encoding as OpenAI's API, so chunk token counts stay consistent with
-    OpenAI embedding and LLM context limits.
+    In docling >=2.x, HybridChunker is a Pydantic v2 model and its ``tokenizer``
+    field is typed as ``BaseTokenizer`` (itself a Pydantic BaseModel).  Passing a
+    plain Python object fails Pydantic validation with a ``model_type`` error.
+    This factory imports ``BaseTokenizer`` at runtime (after docling is on
+    sys.path) and builds a compliant subclass.  If no matching base class is
+    found (very old docling), it falls back to a plain Python class so the
+    caller can still attempt construction and let the outer try/except handle it.
 
-    Used when DOCLING_TOKENIZER_PROVIDER=openai_compatible.
+    The returned class constructor accepts ``model_name`` as its first keyword
+    argument and is safe to instantiate before the docling import happens.
     """
+    try:
+        import tiktoken as _tiktoken
+    except ImportError as exc:
+        raise ImportError(
+            "tiktoken is required for DOCLING_TOKENIZER_PROVIDER=openai_compatible. "
+            "It is bundled with langchain-openai: pip install langchain-openai"
+        ) from exc
 
-    def __init__(self, model_name: str = "text-embedding-3-small") -> None:
+    # Probe known locations for BaseTokenizer across docling / docling-core versions.
+    _DoclingBase = None
+    for _mod_path, _attr in [
+        ("docling_core.transforms.chunker.tokenizer_utils", "BaseTokenizer"),
+        ("docling_core.transforms.chunker",                 "BaseTokenizer"),
+        ("docling.chunking",                                "BaseTokenizer"),
+    ]:
         try:
-            import tiktoken
-        except ImportError as exc:
-            raise ImportError(
-                "tiktoken is required for DOCLING_TOKENIZER_PROVIDER=openai_compatible. "
-                "It is bundled with langchain-openai: pip install langchain-openai"
-            ) from exc
+            import importlib
+            _mod = importlib.import_module(_mod_path)
+            _candidate = getattr(_mod, _attr, None)
+            if _candidate is not None:
+                _DoclingBase = _candidate
+                break
+        except ImportError:
+            continue
 
+    if _DoclingBase is not None:
+        # Pydantic-aware subclass — satisfies HybridChunker's type validator.
         try:
-            self._enc = tiktoken.encoding_for_model(model_name)
-        except KeyError:
-            # Unknown model name — fall back to the encoding used by most OpenAI models
-            self._enc = tiktoken.get_encoding("cl100k_base")
+            from pydantic import PrivateAttr, ConfigDict
 
-        # HybridChunker reads .model_max_length to cap chunk size.
-        # 8 191 is the context limit for text-embedding-3-small / text-embedding-ada-002.
-        self.model_max_length: int = 8191
+            class TiktokenWrapper(_DoclingBase):  # type: ignore[valid-type]
+                model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    def encode(self, text: str, **kwargs) -> list[int]:  # noqa: ARG002
-        return self._enc.encode(text)
+                # Declared Pydantic fields (serialisable)
+                model_name: str = "text-embedding-3-small"
+                model_max_length: int = 8191
 
-    def decode(self, token_ids: list[int], **kwargs) -> str:  # noqa: ARG002
-        return self._enc.decode(token_ids)
+                # Private runtime state — not part of the Pydantic schema
+                _enc: object = PrivateAttr(default=None)
+
+                def model_post_init(self, __context: object) -> None:
+                    try:
+                        self._enc = _tiktoken.encoding_for_model(self.model_name)
+                    except KeyError:
+                        self._enc = _tiktoken.get_encoding("cl100k_base")
+
+                # ── docling >=2.x interface ─────────────────────────────────
+                def count_tokens(self, text: str) -> int:
+                    return len(self._enc.encode(text))
+
+                @property
+                def max_tokens(self) -> int:
+                    return self.model_max_length
+
+                # ── legacy / fallback interface (older docling) ─────────────
+                def encode(self, text: str, **kwargs) -> list[int]:  # noqa: ARG002
+                    return self._enc.encode(text)
+
+                def decode(self, token_ids: list[int], **kwargs) -> str:  # noqa: ARG002
+                    return self._enc.decode(token_ids)
+
+            return TiktokenWrapper
+
+        except Exception:
+            pass  # fall through to plain-class fallback below
+
+    # Plain-class fallback for very old docling (no Pydantic validation).
+    class TiktokenWrapper:  # type: ignore[no-redef]
+        def __init__(self, model_name: str = "text-embedding-3-small", **_: object) -> None:
+            try:
+                self._enc = _tiktoken.encoding_for_model(model_name)
+            except KeyError:
+                self._enc = _tiktoken.get_encoding("cl100k_base")
+            self.model_max_length: int = 8191
+
+        def count_tokens(self, text: str) -> int:
+            return len(self._enc.encode(text))
+
+        @property
+        def max_tokens(self) -> int:
+            return self.model_max_length
+
+        def encode(self, text: str, **kwargs) -> list[int]:  # noqa: ARG002
+            return self._enc.encode(text)
+
+        def decode(self, token_ids: list[int], **kwargs) -> str:  # noqa: ARG002
+            return self._enc.decode(token_ids)
+
+    return TiktokenWrapper
 
 
 def _build_docling_tokenizer():
@@ -97,14 +166,15 @@ def _build_docling_tokenizer():
 
     - provider=local            → path string from DOCLING_TOKENIZER_MODEL, or None
                                   (None means docling uses its own default tokenizer)
-    - provider=openai_compatible → _TiktokenWrapper instance using the same encoding
-                                  as EMBEDDING_MODEL (or text-embedding-3-small)
+    - provider=openai_compatible → TiktokenWrapper instance (proper BaseTokenizer
+                                  subclass for Pydantic v2 compatibility)
     """
     provider = config.DOCLING_TOKENIZER_PROVIDER
 
     if provider == "openai_compatible":
         model_name = config.EMBEDDING_MODEL or "text-embedding-3-small"
-        return _TiktokenWrapper(model_name=model_name)
+        TiktokenWrapper = _make_tiktoken_wrapper_class()
+        return TiktokenWrapper(model_name=model_name)
 
     # Default: local path (may be empty → None → docling uses its own default)
     return config.DOCLING_TOKENIZER_MODEL or None
@@ -169,8 +239,10 @@ def _docling_to_chunks(html: str, title: str, url: str, page_id: str) -> list[di
                 if tokenizer is not None
                 else HybridChunker()
             )
-        except TypeError:
-            # Older docling versions may not accept `tokenizer` kwarg
+        except Exception:
+            # Older docling: no `tokenizer` kwarg (TypeError).
+            # Newer docling with unrecognised tokenizer type: Pydantic ValidationError.
+            # Either way fall back to the default tokenizer.
             chunker = HybridChunker()
 
         chunks: list[dict] = []
