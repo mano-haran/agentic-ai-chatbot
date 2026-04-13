@@ -74,6 +74,12 @@ CONFLUENCE_TOKEN: str = os.getenv("CONFLUENCE_TOKEN", "")   # Personal Access To
 CHROMA_PATH: str = os.getenv("CHROMA_PATH", "data/chroma")
 CHROMA_COLLECTION: str = os.getenv("CHROMA_COLLECTION", "confluence")
 
+# Page content cache — stores fetched Confluence HTML on disk to avoid
+# redundant API calls.  Cache entries are refreshed when the Confluence page
+# version changes OR when the entry is older than PAGE_CACHE_TTL_HOURS.
+PAGE_CACHE_DIR: str = os.getenv("PAGE_CACHE_DIR", "data/page_cache")
+PAGE_CACHE_TTL_HOURS: int = int(os.getenv("PAGE_CACHE_TTL_HOURS", "24"))
+
 # Embedding provider: "local" (sentence-transformers, no API key needed) or "openai"
 EMBEDDING_PROVIDER: str = os.getenv("EMBEDDING_PROVIDER", "local")
 EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL", "")        # provider-specific default applied in embeddings.py

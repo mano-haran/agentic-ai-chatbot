@@ -25,7 +25,9 @@ Four tools are exposed:
 
 from __future__ import annotations
 
+import json
 import re
+from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 
@@ -534,6 +536,45 @@ def find_confluence_page_ids(query: str, top_k: int = 5) -> str:
     return "\n".join(lines)
 
 
+# ── Page content cache ────────────────────────────────────────────────────────
+
+
+def _page_cache_path(page_id: str) -> Path:
+    cache_dir = Path(config.PAGE_CACHE_DIR)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    return cache_dir / f"{page_id}.json"
+
+
+def _load_page_cache(page_id: str) -> dict | None:
+    """Return the cached entry for *page_id*, or None if it does not exist."""
+    path = _page_cache_path(page_id)
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def _save_page_cache(
+    page_id: str, title: str, url: str, html: str, confluence_version: int
+) -> None:
+    """Write a cache entry to disk using an atomic rename so reads never see
+    a partially-written file."""
+    data = {
+        "page_id": page_id,
+        "title": title,
+        "url": url,
+        "html": html,
+        "confluence_version": confluence_version,
+        "cached_at": datetime.now(timezone.utc).isoformat(),
+    }
+    path = _page_cache_path(page_id)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    tmp.rename(path)
+
+
 # ── Tool: fetch_page_by_id ────────────────────────────────────────────────────
 
 def fetch_page_by_id(page_id: str, query: str = "") -> str:
@@ -580,14 +621,48 @@ def fetch_page_by_id(page_id: str, query: str = "") -> str:
             cloud=False,
         )
 
-        page = cf.get_page_by_id(page_id, expand="body.storage")
+        # ── Cache lookup ────────────────────────────────────────────────────────
+        # Strategy:
+        #   • Cache fresh (< TTL) AND Confluence version unchanged → serve cache
+        #   • Cache fresh but Confluence version changed → full fetch + update cache
+        #   • Cache stale (≥ TTL) or missing → full fetch + update cache
+        ttl_seconds = config.PAGE_CACHE_TTL_HOURS * 3600
+        now = datetime.now(timezone.utc)
+        cached = _load_page_cache(page_id)
+        html = title = url = None
+        confluence_version = 0
 
-        title = page.get("title", "Untitled")
-        base = config.CONFLUENCE_URL.rstrip("/")
-        url = f"{base}/pages/viewpage.action?pageId={page_id}"
+        if cached:
+            cached_at = datetime.fromisoformat(cached["cached_at"])
+            age_seconds = (now - cached_at).total_seconds()
 
-        html = page.get("body", {}).get("storage", {}).get("value", "")
+            if age_seconds < ttl_seconds:
+                # Cache is within TTL — do a lightweight version check.
+                # expand="version" fetches only metadata, not the HTML body.
+                version_resp = cf.get_page_by_id(page_id, expand="version")
+                current_version = (
+                    (version_resp or {}).get("version", {}).get("number", 0)
+                )
+                if current_version == cached["confluence_version"]:
+                    # Page unchanged: serve from cache; skip full fetch.
+                    html = cached["html"]
+                    title = cached["title"]
+                    url = cached["url"]
+                    confluence_version = current_version
 
+        if html is None:
+            # Cache miss, stale, or Confluence page updated — fetch full content.
+            page = cf.get_page_by_id(page_id, expand="body.storage,version")
+
+            title = page.get("title", "Untitled")
+            base = config.CONFLUENCE_URL.rstrip("/")
+            url = f"{base}/pages/viewpage.action?pageId={page_id}"
+            html = page.get("body", {}).get("storage", {}).get("value", "")
+            confluence_version = (page.get("version") or {}).get("number", 0)
+
+            _save_page_cache(page_id, title, url, html, confluence_version)
+
+        # ── Content rendering ───────────────────────────────────────────────────
         if not html:
             return f"**{title}**\nURL: {url}\n\n(No content available)"
 
