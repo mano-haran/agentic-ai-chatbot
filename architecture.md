@@ -6,7 +6,7 @@
 
 1. [Framework Overview](#framework-overview)
 2. [Core Components](#core-components)
-3. [DevOps Knowledgebase Workflow (v2)](#devops-knowledgebase-workflow-v2)
+3. [DevOps Knowledgebase Workflow](#devops-knowledgebase-workflow)
 4. [RAG Improvement Stack](#rag-improvement-stack)
 5. [Embedding and Vector Store](#embedding-and-vector-store)
 6. [Conversation History](#conversation-history)
@@ -94,115 +94,68 @@ Two routing methods:
 
 ---
 
-## DevOps Knowledgebase Workflow (v2)
+## DevOps Knowledgebase Workflow
 
 **File**: `workflows/devops_kb_search/workflow.yaml`
 
 ### Design Goals
 
-1. **Complete context**: Send full Confluence pages to the LLM, not fragments. Chunk-based RAG often misses critical information that appears in different sections of the same page.
+1. **Complete context**: Send the full Confluence page to the LLM, not fragments. Chunk-based RAG often misses critical information that appears in different sections of the same page.
 2. **Content-level search**: RAG chunks capture section-level content, not just titles. A query about "reset Jenkins credentials" finds the specific section in a long guide even if the page title is generic.
-3. **Efficient context use**: Full pages can be very large. Apply intelligent compression so context windows are not wasted on irrelevant sections.
-4. **Follow-up Q&A without re-fetching**: Once a page is in the conversation context, follow-up questions are answered directly without additional Confluence API calls.
+3. **Any question about the page**: Because the LLM receives the entire page, users can ask any follow-up about any section — including material the original search phrase did not mention.
+4. **Minimal round trips**: Retrieval and page fetch are combined into a single atomic tool call so the happy path is exactly two LLM calls.
 
-### Pipeline (4 agents)
+### Pipeline (2 agents)
 
 ```
-query_analyzer_agent
-        │  SEARCH_QUERY: <phrase>  OR  [FOLLOW-UP]
-        ▼
-page_locator_agent          tools: find_confluence_page_ids, fetch_confluence_page
-        │  PAGE_RESULTS: page_id=X | title=... | score=... | matched_sections=[...]
-        ▼
-page_fetcher_agent          tool: fetch_page_by_id
-        │  Full (possibly compressed) page content
+retriever_agent             tool: search_and_fetch_pages(query, top_k=1)
+        │   1. Vector search on Chroma (+ optional BM25 + reranker) → page_id
+        │   2. Fetches the FULL page by that page_id from Confluence
+        │   PAGES_FETCHED: 1  +  full page text (title, URL, body)
         ▼
 answer_agent
-        │  Grounded answer with citations
+        │   Grounded answer with inline citations — uses the complete page verbatim
         ▼
      User
 ```
 
-### Stage 1 — Query Analysis
+### Stage 1 — Retrieve (inline query rewrite + atomic fetch)
 
-- Detects follow-up questions (pages already in history → outputs `[FOLLOW-UP]`)
-- Extracts a 3–6 word search phrase optimised for vector similarity search
-- No tools; temperature 0.0
+The retriever distils the user's latest message (resolving follow-up references against the prior conversation) into a focused 3–8 word search phrase and calls `search_and_fetch_pages(query=<phrase>, top_k=1)` exactly once. That single tool call performs:
 
-**Design decision — separate query analysis from retrieval**: Keeping query analysis as its own pipeline stage gives the retrieval agent a clean, focused search phrase rather than a full natural-language question. This consistently improves vector search recall for conversational queries.
-
-### Stage 2 — Page Location
-
-**Primary path — Vector search** (`find_confluence_page_ids`):
-- Searches Chroma with `top_k * 4` candidates to maximise recall before filtering
-- Groups chunks by `page_id` (read from metadata, or parsed from `?pageId=` in URL for legacy ingestions that pre-date explicit `page_id` metadata storage)
-- Deduplicates: multiple chunks from the same page → one entry with the best score and a list of matched section names
-- Returns ranked `PAGE_RESULTS` block: page IDs, titles, scores, matched section names
+1. **Vector search** on Chroma to rank candidate chunks, grouped by `page_id` (read from metadata, or parsed from `?pageId=` in URL for legacy ingestions).
+2. **Optional BM25 + reranker** layered on top of vector results via Reciprocal Rank Fusion and a cross-encoder.
+3. **Full-page fetch** from Confluence for the best-matching page ID.
+4. Returns the complete page (title, URL, body as plain text) wrapped in a `PAGES_FETCHED: N` envelope.
 
 **Fallback path — CQL search** (`fetch_confluence_page`):
-- Used only when vector search returns `[NO PAGES FOUND]`
-- Performs full-text CQL search against the live Confluence API
-- Extracts page IDs from result URLs for the next stage
+- Triggered inside `search_and_fetch_pages` only when vector search returns `[NO PAGES FOUND]` (e.g. because the Chroma store is empty or all scores fall below `SIMILARITY_THRESHOLD`).
+- Performs full-text CQL search against the live Confluence API, picks the top result and fetches it.
 
 **Design decision — RAG as index, not retrieval**:
 Chunks are stored in Chroma purely as a search index. Their text content is discarded after the page ID is extracted. This avoids the "fragment answer" problem where the LLM sees only a portion of the relevant page and must guess at what it doesn't have.
 
 **Design decision — chunking still required**:
-A single embedding per page averages the whole document's meaning, making it impossible to locate information in a specific section of a long page. Chunks give each section its own embedding — a query about "credential reset" finds the right section even in a page broadly titled "Jenkins Guide". The key difference from v1 is *what we do with chunk hits after retrieval*: we extract page IDs instead of returning chunk text to the LLM.
+A single embedding per page averages the whole document's meaning, making it impossible to locate information in a specific section of a long page. Chunks give each section its own embedding — a query about "credential reset" finds the right section even in a page broadly titled "Jenkins Guide". The key difference from chunk-answer RAG is *what we do with chunk hits after retrieval*: we extract the page ID and fetch the complete page, instead of returning chunk text to the LLM.
+
+**Design decision — atomic `search_and_fetch_pages`**:
+Combining search and fetch into one tool removes an entire LLM ↔ tool round trip. The retriever agent makes one tool call and returns the output verbatim; the answer agent reads the full page from the shared message state. Happy path = two LLM calls total.
 
 **Design decision — backward compatibility for existing Chroma stores**:
 Old ingestions stored `page_id` only inside the URL string. The tool handles both: if `metadata["page_id"]` exists, use it directly; otherwise parse `pageId=` from the URL. New ingestions include `page_id` as an explicit metadata field.
 
-### Stage 3 — Page Fetching
+### Stage 2 — Answer Synthesis
 
-Calls `fetch_page_by_id(page_id, query)` for each page ID (up to 3, ranked by relevance score).
-
-#### Content Compression Strategy (Strategy 1 — Query-Guided Section Extraction)
-
-| Page size | Action |
-|---|---|
-| < 4 000 chars | Return full page — no compression |
-| ≥ 4 000 chars + query present | Query-guided section extraction |
-| ≥ 4 000 chars + no query | Return full page (no basis for scoring sections) |
-
-**How section extraction works:**
-
-1. Parse the full page HTML into sections using heading tags (h1–h6). Each section is `{heading, level, content}`.
-2. Score each section using keyword overlap between query terms (stopwords excluded) and section text. Heading matches are weighted 2× since headings are concise topic labels.
-3. Classify each section relative to the page's highest-scoring section:
-   - **HIGH** (≥ 60% of top score): full section content included
-   - **MEDIUM** (≥ 20% of top score): first 3 sentences + `...`
-   - **LOW** (< 20% of top score): heading only (structure preserved)
-4. Always prepend a Table of Contents listing every heading with indentation. This ensures the answer agent (and the user) can see the full page structure even when content is compressed.
-5. Stop adding content at 8 000 characters; append `[N more sections omitted]`.
-
-**Design decision — keyword scoring over re-embedding**:
-Re-embedding each section at query time adds an extra embedding API call per page per query. Keyword overlap is a sufficient proxy for section relevance *within a page whose overall relevance has already been confirmed by vector search*. Zero added latency, zero cost.
-
-**Design decision — TOC always included**:
-Compressed pages always show every section heading. This is critical for follow-up Q&A: the answer agent can tell the user "the Rollback Procedure section was trimmed — ask me about it specifically" rather than leaving invisible gaps in the answer.
-
-**Design decision — 3-page cap**:
-3 pages × 8 000 chars ≈ 6 000 tokens of knowledge context, leaving ample room for the answer. Vector search ranks by relevance, so the top 3 cover the most likely sources. Users can ask follow-up questions if more pages are needed.
-
-### Stage 4 — Answer Synthesis
-
-- **Initial mode**: Synthesises a grounded answer from fetched page content. Cites exact URLs. Notes if a page was compressed (more sections available for follow-up).
-- **Follow-up mode**: Full page content is in conversation history. Answers directly with zero tool calls.
-- Temperature 0.1 for consistent, factual answers.
+- Uses the FULL page content produced by the retriever — every section is available verbatim.
+- Answers the user's question using only the fetched page (no prior knowledge, no invented details).
+- Can answer questions about any section, including follow-ups on topics the search phrase did not mention.
+- If the page genuinely does not contain an answer, says so clearly rather than guessing.
+- Emits inline citations `[1]`, `[2]` keyed to a Sources block with URLs copied verbatim from the fetched content.
+- No tools; temperature 0.1 for consistent, factual answers.
 
 ### Follow-up Q&A Mechanism
 
-After the first answer, the fetched page content lives in conversation history as prior AI messages. On the next turn:
-
-1. `query_analyzer_agent` outputs `[FOLLOW-UP]` (pages visible in history, question about the same topic)
-2. `page_locator_agent` sees `[FOLLOW-UP]` → outputs `[FOLLOW-UP — SKIP RETRIEVAL]`, calls no tools
-3. `page_fetcher_agent` sees skip signal → outputs `[FOLLOW-UP — PAGES ALREADY IN CONTEXT]`, calls no tools
-4. `answer_agent` answers from in-context history
-
-Follow-up Q&A is instant (zero Confluence API calls, zero vector search calls) and accurate (working from the exact same pages as the initial answer).
-
-**Edge case — follow-up about a compressed section**: If the user asks about a section that was shown as heading-only, the answer agent flags this and invites the user to ask specifically. A future enhancement could add a `re_fetch_section` tool that fetches the full page again with a targeted section query.
+Follow-ups are handled naturally by the retriever: it sees the prior conversation and either (a) resolves a pronoun/reference and re-searches for the same page, reusing the Confluence page cache on the tool side, or (b) fetches a different page if the user has pivoted to a new topic. Because the complete page is always delivered to the answer agent, follow-up questions about any section of the current page are answered correctly without needing a separate "skip retrieval" branch.
 
 ---
 
@@ -276,8 +229,8 @@ RETRIEVAL  (tools/confluence.py → find_confluence_page_ids)
                     └────────┬────────────────────────────────┘
                              │ top RERANKER_TOP_N page IDs
                              ▼
-                    page_fetcher_agent
-                    (fetch full pages → compress → answer)
+                    retriever_agent
+                    (search_and_fetch_pages → full page → answer)
 ```
 
 ### Layer-by-Layer Explanation
@@ -319,7 +272,7 @@ RETRIEVAL  (tools/confluence.py → find_confluence_page_ids)
 
 **Two-stage retrieval**: The reranker is expensive (O(n × query_length) cross-attention). The pipeline first collects `RERANKER_CANDIDATE_K` candidate pages cheaply via vector+BM25, then passes their best-matching chunk texts to the reranker. Only `RERANKER_TOP_N` pages are returned after reranking.
 
-**Design decision — reranker text = best chunk, not full page**: The reranker scores (query, document) pairs where each document is the top-scoring chunk for that page. This is significantly faster than reranking against full compressed pages, and the best chunk is the most relevant snippet the page has to offer anyway.
+**Design decision — reranker text = best chunk, not full page**: The reranker scores (query, document) pairs where each document is the top-scoring chunk for that page. This is significantly faster than reranking against full pages, and the best chunk is the most relevant snippet the page has to offer anyway. The full page is still what gets fetched and sent to the answer agent — the reranker only picks *which* page.
 
 **Design decision — failures are non-fatal**: If the reranker endpoint is unreachable, the pipeline logs a warning and falls back to vector/RRF ordering. The answer agent still gets useful pages — reranking is a quality improvement, not a requirement.
 
