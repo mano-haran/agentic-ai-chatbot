@@ -8,12 +8,12 @@ Four tools are exposed:
       Returns page IDs, titles, relevance scores, and matched section names —
       NOT the chunk text itself.  Pass the returned page IDs to fetch_page_by_id.
 
-  fetch_page_by_id(page_id, query="")
+  fetch_page_by_id(page_id)
       Fetch the full content of a Confluence page by its exact numeric page ID.
-      For short pages (< 4 000 chars) the full text is returned.
-      For larger pages, query-guided section extraction (Strategy 1) is applied:
-      highly relevant sections are returned in full, moderately relevant sections
-      are truncated to 3 sentences, and low-relevance sections show heading only.
+      Returns the COMPLETE plain-text page content — no truncation, no
+      compression.  The full page is handed to the LLM so it can answer any
+      question against it, including follow-up questions about sections the
+      original query didn't surface.
 
   fetch_confluence_page(query)
       Full-text CQL search against the live Confluence Data Center API.
@@ -40,10 +40,11 @@ def _mock_confluence_dir() -> Path:
     return Path(config.MOCK_DATA_DIR) / "confluence"
 
 
-def _mock_fetch_page_by_id(page_id: str, query: str) -> str:
+def _mock_fetch_page_by_id(page_id: str) -> str:
     """
-    Read a mock page from tests/mock_data/confluence/<page_id>.html and apply
-    the same parsing and compression logic as the real fetch_page_by_id.
+    Read a mock page from tests/mock_data/confluence/<page_id>.html and return
+    the full plain-text content.  Mirrors the real fetch_page_by_id exactly:
+    no compression, no truncation — the whole page is sent to the LLM.
     """
     d = _mock_confluence_dir()
     path = d / f"{page_id}.html"
@@ -59,19 +60,8 @@ def _mock_fetch_page_by_id(page_id: str, query: str) -> str:
     title = title_m.group(1).strip() if title_m else f"Page {page_id}"
     url = f"file://{path.resolve()}"
 
-    sections = _parse_html_sections(html)
-    raw_text_len = sum(len(s["content"]) for s in sections)
-
-    if raw_text_len <= _FULL_PAGE_THRESHOLD or not query:
-        full = _html_to_text(html)
-        return f"**{title}**\nURL: {url}\n\n{full}"
-    else:
-        compressed = _compress_page_content(sections, query, max_chars=8000)
-        return (
-            f"**{title}**\nURL: {url}\n\n"
-            "[Content compressed — query-guided section extraction applied]\n\n"
-            f"{compressed}"
-        )
+    full = _html_to_text(html)
+    return f"**{title}**\nURL: {url}\n\n{full}"
 
 
 def _mock_fetch_confluence_page(query: str) -> str:
@@ -115,8 +105,6 @@ def _mock_fetch_confluence_page(query: str) -> str:
         text = _html_to_text(html)
         page_id = path.stem
         url = f"file://{path.resolve()}"
-        if len(text) > 4000:
-            text = text[:4000] + "\n...[content truncated]"
         parts.append(f"**{title}**\nURL: {url}\n\n{text}")
 
     return "\n\n---\n\n".join(parts)
@@ -125,10 +113,6 @@ def _mock_fetch_confluence_page(query: str) -> str:
 # Configurable via config.SIMILARITY_THRESHOLD (env: SIMILARITY_THRESHOLD).
 # This module reads config lazily at call time so test suites / runtime
 # reloads pick up changes without reimporting.
-
-# Pages with total plain-text content below this threshold are returned in
-# full without compression.  Above it, query-guided section extraction applies.
-_FULL_PAGE_THRESHOLD = 4000   # chars
 
 
 # ── Vector store ───────────────────────────────────────────────────────────────
@@ -164,173 +148,6 @@ def _html_to_text(html: str) -> str:
     except ImportError:
         # Fallback: naive tag stripping
         return re.sub(r"<[^>]+>", " ", html).strip()
-
-
-def _parse_html_sections(html: str) -> list[dict]:
-    """
-    Parse Confluence HTML into structured sections preserving heading hierarchy.
-
-    Returns a list of dicts: {heading: str, level: int, content: str}
-    Each dict represents one heading plus all body text until the next heading.
-    The first dict may have an empty heading (page introduction before any heading).
-    """
-    try:
-        from bs4 import BeautifulSoup
-    except ImportError:
-        # bs4 not available — return single section with plain-text content
-        return [{"heading": "", "level": 1, "content": _html_to_text(html)}]
-
-    soup = BeautifulSoup(html, "html.parser")
-
-    # Remove noise tags
-    for tag in soup(["script", "style", "ac:structured-macro"]):
-        tag.decompose()
-
-    sections: list[dict] = []
-    current_heading = ""
-    current_level = 1
-    current_lines: list[str] = []
-
-    def _flush() -> None:
-        content = "\n".join(current_lines).strip()
-        if current_heading or content:
-            sections.append({
-                "heading": current_heading,
-                "level": current_level,
-                "content": content,
-            })
-
-    # Iterate all relevant elements in document order
-    for tag in soup.find_all(
-        ["h1", "h2", "h3", "h4", "h5", "h6", "p", "li", "pre", "code", "td"],
-        recursive=True,
-    ):
-        if tag.name in ("h1", "h2", "h3", "h4", "h5", "h6"):
-            _flush()
-            current_heading = tag.get_text(strip=True)
-            current_level = int(tag.name[1])
-            current_lines = []
-        else:
-            text = tag.get_text(" ", strip=True)
-            if text:
-                current_lines.append(text)
-
-    _flush()
-
-    # Filter out completely empty entries
-    return [s for s in sections if s["heading"] or s["content"]]
-
-
-# ── Section scoring and compression ───────────────────────────────────────────
-
-def _score_section_relevance(section: dict, query: str) -> float:
-    """
-    Score a section's relevance to the query using keyword overlap.
-
-    Heading matches are weighted 2x (headings are concise topic labels).
-    Common stopwords are excluded from query terms.
-    Returns a float 0.0–1.0.
-    """
-    stopwords = {
-        "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
-        "have", "has", "had", "do", "does", "did", "will", "would", "could",
-        "should", "may", "might", "shall", "can", "how", "what", "where",
-        "when", "why", "who", "which", "to", "for", "of", "in", "on", "at",
-        "by", "from", "up", "about", "into", "i", "you", "we", "my", "our",
-    }
-
-    query_terms = {
-        w for w in re.findall(r"\w+", query.lower())
-        if w not in stopwords and len(w) > 2
-    }
-
-    if not query_terms:
-        return 0.5  # no query terms → treat all sections equally
-
-    heading_text = section["heading"].lower()
-    content_text = section["content"].lower()
-
-    heading_hits = sum(1 for t in query_terms if t in heading_text)
-    content_hits = sum(1 for t in query_terms if t in content_text)
-
-    score = (heading_hits * 2 + content_hits) / (len(query_terms) * 3)
-    return min(score, 1.0)
-
-
-def _compress_page_content(sections: list[dict], query: str, max_chars: int = 8000) -> str:
-    """
-    Apply query-guided section extraction (Strategy 1).
-
-    Scoring tiers (relative to the best-scoring section in the page):
-      HIGH   >= 60% of top score  → full section content included
-      MEDIUM >= 20% of top score  → first 3 sentences + '...'
-      LOW    <  20% of top score  → heading only (structure preserved)
-
-    Always prepends a TOC skeleton listing every heading so the user can see
-    the full page structure and ask follow-up questions about any section, even
-    ones that were trimmed.
-
-    Stops adding content once max_chars is reached; appends a count of omitted
-    sections so the LLM knows more content exists.
-    """
-    if not sections:
-        return ""
-
-    # Score all sections
-    scores = [_score_section_relevance(s, query) for s in sections]
-    max_score = max(scores) if scores else 0.0
-
-    high_threshold = max(max_score * 0.6, 0.15)
-    medium_threshold = max(max_score * 0.2, 0.05)
-
-    # Build TOC
-    toc_lines = ["**Table of Contents**"]
-    for section in sections:
-        if section["heading"]:
-            indent = " " * ((section["level"] - 1) * 2)
-            toc_lines.append(f"{indent}• {section['heading']}")
-    toc = "\n".join(toc_lines)
-
-    # Build content
-    content_parts: list[str] = []
-    total_chars = len(toc)
-    omitted = 0
-
-    for section, score in zip(sections, scores):
-        level = max(1, section["level"])
-        heading_prefix = "#" * level + (" " if section["heading"] else "")
-        heading_line = heading_prefix + section["heading"] if section["heading"] else ""
-
-        if score >= high_threshold:
-            body = section["content"]
-            part = (heading_line + "\n" + body).strip() if heading_line else body.strip()
-        elif score >= medium_threshold:
-            # First 3 sentences
-            sentences = re.split(r"(?<=[.!?])\s+", section["content"])
-            truncated = " ".join(sentences[:3])
-            if len(sentences) > 3:
-                truncated += " ..."
-            part = (heading_line + "\n" + truncated).strip() if heading_line else truncated.strip()
-        else:
-            # Heading only
-            part = heading_line.strip()
-
-        if not part:
-            continue
-
-        if total_chars + len(part) + 2 > max_chars:
-            omitted += 1
-            continue
-
-        content_parts.append(part)
-        total_chars += len(part) + 2  # +2 for the separator
-
-    result = toc + "\n\n" + "\n\n".join(content_parts)
-
-    if omitted:
-        result += f"\n\n... [{omitted} more section(s) omitted]"
-
-    return result
 
 
 # ── Tool: find_confluence_page_ids ────────────────────────────────────────────
@@ -582,28 +399,24 @@ def _save_page_cache(
 
 # ── Tool: fetch_page_by_id ────────────────────────────────────────────────────
 
-def fetch_page_by_id(page_id: str, query: str = "") -> str:
+def fetch_page_by_id(page_id: str) -> str:
     """
-    Fetch the full content of a Confluence page by its exact page ID.
+    Fetch the complete content of a Confluence page by its exact page ID.
 
-    For pages under 4 000 characters: returns the complete plain-text content.
-    For larger pages: applies query-guided section extraction (Strategy 1):
-      • Sections highly relevant to the query receive full content
-      • Sections moderately relevant receive the first 3 sentences
-      • Sections with low relevance show heading only (structure preserved)
-    A table of contents is always prepended so every section is visible,
-    enabling accurate follow-up Q&A on any part of the page.
+    Returns the FULL plain-text content of the page — no truncation, no
+    compression, no query-guided section filtering.  The entire page is
+    handed to the LLM so the user can ask any question about any part of it,
+    including follow-up questions about sections the initial query did not
+    surface.
 
     Args:
         page_id: Numeric Confluence page ID (string).
-        query:   User's original search query for section scoring.
-                 Pass empty string to disable scoring (equal weight, all sections).
 
     Returns:
-        Formatted string: title, URL, optional compression notice, content.
+        Formatted string: title, URL, and the full plain-text page content.
     """
     if config.MOCK_CONFLUENCE:
-        return _mock_fetch_page_by_id(page_id, query)
+        return _mock_fetch_page_by_id(page_id)
 
     try:
         from atlassian import Confluence
@@ -671,19 +484,11 @@ def fetch_page_by_id(page_id: str, query: str = "") -> str:
         if not html:
             return f"**{title}**\nURL: {url}\n\n(No content available)"
 
-        sections = _parse_html_sections(html)
-        raw_text_len = sum(len(s["content"]) for s in sections)
-
-        if raw_text_len <= _FULL_PAGE_THRESHOLD or not query:
-            full = _html_to_text(html)
-            return f"**{title}**\nURL: {url}\n\n{full}"
-        else:
-            compressed = _compress_page_content(sections, query, max_chars=8000)
-            return (
-                f"**{title}**\nURL: {url}\n\n"
-                "[Content compressed — query-guided section extraction applied]\n\n"
-                f"{compressed}"
-            )
+        # Return the complete page as plain text — no compression, no truncation.
+        # The LLM gets the whole page so it can answer any question about any
+        # section, including follow-ups on material the search query did not hit.
+        full = _html_to_text(html)
+        return f"**{title}**\nURL: {url}\n\n{full}"
 
     except Exception as exc:
         return f"[fetch_page_by_id] Failed to fetch page {page_id}: {exc}"
@@ -761,11 +566,8 @@ def fetch_confluence_page(query: str) -> str:
         html = page.get("body", {}).get("storage", {}).get("value", "")
         text = _html_to_text(html) if html else "(no content available)"
 
-        # Cap per-page content to avoid blowing the context window.
-        # ~4 000 chars ≈ ~1 000 tokens, enough for a detailed section.
-        if len(text) > 4000:
-            text = text[:4000] + "\n...[content truncated]"
-
+        # Return full plain-text content — no truncation.  The LLM receives
+        # the complete page so the user can ask any follow-up question about it.
         parts.append(f"**{title}**\nURL: {url}\n\n{text}")
 
     return "\n\n---\n\n".join(parts)
@@ -773,23 +575,24 @@ def fetch_confluence_page(query: str) -> str:
 
 # ── Tool: search_and_fetch_pages (atomic retrieve + fetch) ────────────────────
 
-def search_and_fetch_pages(query: str, top_k: int = 3) -> str:
+def search_and_fetch_pages(query: str, top_k: int = 1) -> str:
     """
-    Atomic RAG retrieval: find the top pages for a query AND fetch their
-    compressed content in a single tool call.  Designed to replace the
-    two-step page_locator → page_fetcher dance that used to require two
-    separate LLM turns.
+    Atomic RAG retrieval: find the best-matching Confluence page IDs via
+    vector search (plus optional BM25 + reranker) AND fetch the FULL page
+    content from Confluence for each, all in a single tool call.
 
     Pipeline:
-      1. Vector search (optional BM25 + RRF, optional reranker)
-      2. Parallel fetch of the top-k pages (threaded, with per-page cache)
-      3. Query-guided compression for large pages
-      4. CQL fallback when vector search returns [NO PAGES FOUND]
+      1. Vector search on Chroma (+ optional BM25 + RRF, optional reranker)
+         → best-matching page IDs
+      2. Parallel fetch of the top-k pages from Confluence via page ID
+         (threaded, with per-page cache) — full page content, no compression
+      3. CQL full-text fallback when vector search returns [NO PAGES FOUND]
 
     Args:
         query:  Natural-language question or search phrase.
-        top_k:  Number of pages to fetch (default 3 — matches the prior
-                page_fetcher cap; keeps context window predictable).
+        top_k:  Number of matching pages to fetch (default 1 — return only
+                the single best-matching page so the LLM can answer any
+                question about it.  Raise if you need more than one page).
 
     Returns:
         A single formatted block ready to be consumed by the answer agent:
@@ -799,13 +602,11 @@ def search_and_fetch_pages(query: str, top_k: int = 3) -> str:
             **Page Title**
             URL: https://...
 
-            <page content>
+            <full page content>
             ─────────────────────────────
-            **Next Page Title**
-            ...
 
-        Or the [NO PAGES FOUND] / [NO RESULTS AFTER FALLBACK] sentinel
-        when nothing is retrievable.
+        Or the [NO PAGES FOUND] / [NO PAGES PARSED] sentinel when nothing
+        is retrievable.
     """
     # ── Step 1: locate page IDs via the existing retrieval pipeline ─────────
     located = find_confluence_page_ids(query, top_k=top_k)
@@ -837,14 +638,14 @@ def search_and_fetch_pages(query: str, top_k: int = 3) -> str:
         # we couldn't parse any IDs.  Surface the raw block so the LLM can see.
         return f"[NO PAGES PARSED]\n{located}"
 
-    # ── Step 2: fetch pages in parallel ─────────────────────────────────────
+    # ── Step 2: fetch full pages in parallel ────────────────────────────────
     # Confluence fetches are I/O-bound (HTTPS + cache read).  A small thread
-    # pool matches or beats sequential by 2–3× for top_k=3.
+    # pool matches or beats sequential by 2–3× when top_k > 1.
     from concurrent.futures import ThreadPoolExecutor
 
     def _safe_fetch(pid: str) -> tuple[str, str]:
         try:
-            return pid, fetch_page_by_id(pid, query)
+            return pid, fetch_page_by_id(pid)
         except Exception as exc:
             return pid, f"[fetch_page_by_id] Failed to fetch page {pid}: {exc}"
 

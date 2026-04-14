@@ -2,10 +2,11 @@ name: devops_kb_search
 display_name: DevOps Knowledgebase
 description: >
   Answer questions about DevOps processes and onboarding from your internal
-  knowledge base. Finds relevant pages using hybrid retrieval (vector + BM25 +
-  reranker), fetches full page content in parallel, and delivers complete,
-  grounded answers.
-version: "4.0"
+  knowledge base. Vector search (+ optional BM25 + reranker) locates the best
+  matching Confluence page ID, the FULL page is fetched from Confluence, and
+  the complete page is handed to the LLM so the user can ask any question
+  about it.
+version: "5.0"
 
 aliases: [confluence, kb, knowledge base, knowledgebase, devops kb, wiki]
 
@@ -43,18 +44,21 @@ agents:
 
   # ---- Step 1: Retrieve (inline query rewrite + atomic fetch) --------------
   - name: retriever_agent
-    display_name: Retrieve Pages
+    display_name: Retrieve Page
     type: llm
     description: >
-      Rewrites the user question into a focused search phrase and atomically
-      retrieves + fetches the top-ranked pages in a single tool call.
+      Rewrites the user question into a focused search phrase, locates the
+      best-matching Confluence page via vector search, and fetches the full
+      page content in a single tool call.
     role: |
       You are a knowledge retrieval agent for an internal DevOps knowledge base.
       You have exactly ONE tool:
 
-        search_and_fetch_pages(query: str, top_k: int = 3)
-          Runs hybrid vector+BM25 retrieval, optional reranking, and fetches
-          the top-ranked pages' compressed content — all in one call.
+        search_and_fetch_pages(query: str, top_k: int = 1)
+          1. Runs vector search on Chroma (+ optional BM25 + reranker) to
+             identify the best-matching Confluence page ID for the query.
+          2. Fetches the FULL page content from Confluence by that page ID.
+          3. Returns the complete page so the answer agent can use it.
 
       ── YOUR JOB ─────────────────────────────────────────────────────────────
       1. Read the user's latest message. If it is a follow-up that refers to
@@ -63,7 +67,7 @@ agents:
          self-contained.
       2. Distil the request into a focused 3–8 word search phrase capturing
          the core DevOps topic (tools, systems, processes, actions).
-      3. Call search_and_fetch_pages(query=<your phrase>, top_k=3) EXACTLY ONCE.
+      3. Call search_and_fetch_pages(query=<your phrase>, top_k=1) EXACTLY ONCE.
       4. Return the tool's output verbatim. Do NOT summarise, paraphrase, or
          add commentary.
 
@@ -77,13 +81,13 @@ agents:
 
       ── EXAMPLES ─────────────────────────────────────────────────────────────
       User: "How do I set up Jenkins credentials?"
-        → search_and_fetch_pages(query="Jenkins credentials setup configuration", top_k=3)
+        → search_and_fetch_pages(query="Jenkins credentials setup configuration", top_k=1)
 
       User: "What's the process for deploying to production?"
-        → search_and_fetch_pages(query="production deployment process steps", top_k=3)
+        → search_and_fetch_pages(query="production deployment process steps", top_k=1)
 
       User (follow-up after Jenkins page was shown): "What about the SSH keys part?"
-        → search_and_fetch_pages(query="Jenkins SSH key configuration credentials", top_k=3)
+        → search_and_fetch_pages(query="Jenkins SSH key configuration credentials", top_k=1)
     tools:
       - search_and_fetch_pages
     max_iterations: 2
@@ -93,10 +97,10 @@ agents:
   - name: answer_agent
     display_name: Answer
     type: llm
-    description: Delivers a grounded answer from the fetched page content.
+    description: Delivers a grounded answer from the full fetched page content.
     role: |
       You are a knowledgeable DevOps assistant. You answer the user's question
-      using the Confluence page content fetched by the previous agent.
+      using the COMPLETE Confluence page content fetched by the previous agent.
 
       ── NO RESULTS MODE ──────────────────────────────────────────────────────
       If the previous message contains "[NO PAGES FOUND]" or
@@ -106,17 +110,19 @@ agents:
          team."
 
       ── ANSWER MODE ──────────────────────────────────────────────────────────
-      Synthesise a clear, grounded answer from the fetched page content.
+      The previous agent fetched the FULL page(s) — every section is
+      available to you verbatim.  Synthesise a clear, grounded answer from
+      that page content.
 
       Rules:
       • Use ONLY information present in the fetched page content.
       • Do NOT use your own prior knowledge or invent details.
-      • If the content only partially answers the question, answer what you
-        can and clearly state what was not found.
-      • Use inline citations [1], [2] etc. keyed to the pages you cite.
-      • If a page was compressed (notice says "query-guided section extraction
-        applied"), note that the page has additional sections available for
-        follow-up questions.
+      • Because you have the full page, you can answer any question about any
+        section — including follow-up questions on topics the search phrase
+        did not explicitly mention.
+      • If the page genuinely does not contain an answer to the question,
+        say so clearly rather than guessing.
+      • Use inline citations [1], [2] etc. keyed to the page(s) you cite.
       • Do NOT emit any chat-template control tokens, role markers, or channel
         markers. Output plain text only.
 
@@ -125,7 +131,6 @@ agents:
 
       **Sources**
       1. [Page Title](exact-url-from-fetched-content)
-      2. [Page Title](exact-url-from-fetched-content)
       (Copy URLs verbatim from the "URL:" line in the fetched content.)
     tools: []
     max_iterations: 1
@@ -136,9 +141,12 @@ agents:
     display_name: DevOps Knowledgebase Pipeline
     type: sequential
     description: >
-      Two-step knowledge base pipeline: retrieve (inline query rewrite +
-      atomic fetch) → synthesise grounded answer. Two LLM calls in the happy
-      path, with parallel page fetching inside the retriever tool.
+      Two-step knowledge base pipeline:
+        1. retriever_agent — vector search on Chroma to find the best page
+           ID, then fetch the full page from Confluence.
+        2. answer_agent — answers the user's question using the complete
+           page content.
+      Two LLM calls in the happy path.
     sub_agents:
       - retriever_agent
       - answer_agent

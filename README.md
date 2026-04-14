@@ -1112,7 +1112,7 @@ tests/mock_data/
 | #143 | JUnit test failure | 2 of 41 tests failed — email notification + audit log assertions |
 
 **Confluence pages:**
-Each page is >4 000 characters of content, long enough to trigger query-guided section compression. Topics span the full DevOps knowledge area, providing variety for testing retrieval ranking and reranking.
+Each page contains >4 000 characters of content, providing enough variety for testing retrieval ranking and reranking. Topics span the full DevOps knowledge area. The complete page is always fetched and handed to the LLM, so follow-up questions on any section of a page work without re-running retrieval.
 
 ---
 
@@ -1223,9 +1223,9 @@ Then ask questions that map to different mock pages:
 | `What should I do during an incident?` | 10005 — Incident Response Runbook |
 | `What are the code review requirements?` | 10006 — Code Review Guidelines |
 
-#### Step 5 — Test section compression
+#### Step 5 — Test full-page delivery
 
-Ask about a page with many sections (all 6 pages qualify). The answer agent's response will include `[Content compressed — query-guided section extraction applied]` since every mock page exceeds 4 000 characters. You can then ask follow-up questions about specific sections.
+Ask a question about any of the mock pages. The `retriever_agent` finds the best-matching page ID via vector search, then fetches the **complete** page content from Confluence (no compression, no truncation). The `answer_agent` receives the entire page verbatim, so you can follow up with questions about any section — including sections the original query did not mention.
 
 #### Step 6 — Test follow-up Q&A (zero re-fetch)
 
