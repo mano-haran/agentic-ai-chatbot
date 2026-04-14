@@ -55,7 +55,7 @@ class LLMAgent(BaseAgent):
         model: str = config.DEFAULT_MODEL,
         tools: list[StructuredTool] | None = None,
         sub_agents: list[BaseAgent] | None = None,
-        max_iterations: int = 10,
+        max_iterations: int = 3,
         description: str = "",
         display_name: str = "",
         temperature: float = 0.0,
@@ -126,6 +126,13 @@ class LLMAgent(BaseAgent):
         # before the response reaches the user.
         system_msg = SystemMessage(content=self.role + CLARIFICATION_INSTRUCTION)
 
+        # Per-agent iteration counter stored in shared state metadata. Enforcing
+        # this cap is what keeps the ReAct loop from burning tokens when an
+        # over-eager LLM keeps emitting tool_calls.  The key is unique per agent
+        # name so nested/sibling agents don't interfere.
+        iter_key = f"_react_{self.name}_iter"
+        max_iter = self.max_iterations
+
         # Async node so we stay on the event loop and avoid thread-executor
         # issues that can cause silent failures when llm.invoke() is called
         # from a sync function nested inside ainvoke().
@@ -152,15 +159,26 @@ class LLMAgent(BaseAgent):
                 for block in response.content:
                     if isinstance(block, dict) and "text" in block:
                         block["text"] = _strip_artifact_tokens(block["text"])
+
+            # Increment the per-agent ReAct iteration counter so should_continue
+            # can enforce max_iterations.
+            prior = (state.get("metadata") or {}).get(iter_key, 0)
             return {
                 "messages": [response],
                 "next_agent": self.name,
                 "task_results": {self.name: content},
+                "metadata": {iter_key: prior + 1},
             }
 
         def should_continue(state: AgentState) -> str:
             last = state["messages"][-1]
-            if hasattr(last, "tool_calls") and last.tool_calls:
+            has_tool_calls = bool(getattr(last, "tool_calls", None))
+            iters = (state.get("metadata") or {}).get(iter_key, 0)
+            # ``iters`` counts completed agent_node runs, so max_iterations=N
+            # means "allow at most N rounds of tool calls".  The (N+1)-th LLM
+            # call synthesises the final answer from tool results; if that
+            # call still requests more tools we END anyway to cap token spend.
+            if has_tool_calls and iters <= max_iter:
                 return "tools"
             return END
 

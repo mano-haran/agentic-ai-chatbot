@@ -23,7 +23,7 @@ class AgentSchema(BaseModel):
     model: str = config.DEFAULT_MODEL
     max_tokens: int = config.MAX_TOKENS_HARD_LIMIT
     tools: list[str] = Field(default_factory=list)      # tool names from ToolRef list
-    max_iterations: int = 10
+    max_iterations: int = 3
     temperature: float = 0.0
 
     # WorkflowAgent / RouterAgent fields

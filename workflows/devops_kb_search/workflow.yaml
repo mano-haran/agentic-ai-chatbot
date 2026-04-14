@@ -2,10 +2,10 @@ name: devops_kb_search
 display_name: DevOps Knowledgebase
 description: >
   Answer questions about DevOps processes and onboarding from your internal
-  knowledge base. Finds relevant pages using semantic search, fetches full
-  page content from Confluence, and delivers complete, grounded answers.
-  Supports multi-turn Q&A on the same page without re-fetching.
-version: "2.0"
+  knowledge base. Finds relevant pages using hybrid retrieval (vector + BM25 +
+  reranker), fetches full page content in parallel, and delivers complete,
+  grounded answers. Supports multi-turn Q&A on the same page without re-fetching.
+version: "3.0"
 
 aliases: [confluence, kb, knowledge base, knowledgebase, devops kb, wiki]
 
@@ -21,6 +21,12 @@ action_prompt: |
   What process or topic do you want to look up?
 
 tools:
+  # Atomic retrieve + fetch.  Used by the retriever_agent.
+  - name: search_and_fetch_pages
+    module: tools.confluence
+    function: search_and_fetch_pages
+
+  # Kept for power-user / legacy workflows.  Not called in the default pipeline.
   - name: find_confluence_page_ids
     module: tools.confluence
     function: find_confluence_page_ids
@@ -48,7 +54,8 @@ agents:
         [FOLLOW-UP]
       Conditions:
         • The conversation history already contains fetched page content
-          (look for "**Page Contents:**" or "URL: http" in prior messages)
+          (look for "**Page Contents:**", "PAGES_FETCHED:", or "URL: http" in
+          prior messages)
         • The current message is a follow-up (asks about something already
           present in the fetched pages, or says "what about X?", "explain Y",
           "how does Z work?", "tell me more", "and what about")
@@ -71,91 +78,45 @@ agents:
 
       Do NOT answer the question. Do NOT call tools.
     tools: []
+    max_iterations: 1
     temperature: 0.0
 
-  # ---- Step 2: Locate pages -----------------------------------------------
-  - name: page_locator_agent
-    display_name: Locate Pages
+  # ---- Step 2: Retrieve (atomic: locate + fetch in parallel) ---------------
+  - name: retriever_agent
+    display_name: Retrieve Pages
     type: llm
-    description: Finds relevant Confluence page IDs using RAG, falls back to CQL search.
+    description: >
+      Atomically retrieves relevant pages and fetches their compressed content
+      in a single tool call.  Replaces the old locate + fetch two-step dance.
     role: |
-      You are a knowledge retrieval specialist. Your job is to find which
-      Confluence pages contain the answer to the user's question.
+      You are a knowledge retrieval agent.  You have ONE tool:
 
-      You have two tools:
-        find_confluence_page_ids(query)  — searches the vector store; returns
-                                           page IDs ranked by relevance
-        fetch_confluence_page(query)     — CQL full-text search against the live
-                                           Confluence API; use as fallback only
+        search_and_fetch_pages(query, top_k=3)
+          Runs hybrid vector+BM25 retrieval, optional reranking, and fetches
+          the top-ranked pages' compressed content — all in one call.
 
       ── FOLLOW-UP MODE ───────────────────────────────────────────────────────
       If the previous message is exactly "[FOLLOW-UP]", output:
-        [FOLLOW-UP — SKIP RETRIEVAL]
+        [FOLLOW-UP — PAGES ALREADY IN CONTEXT]
       Do NOT call any tools.
 
-      ── LOCATION MODE ────────────────────────────────────────────────────────
+      ── RETRIEVE MODE ────────────────────────────────────────────────────────
       Extract the SEARCH_QUERY value from the previous message.
+      Call search_and_fetch_pages(query=<SEARCH_QUERY>, top_k=3) EXACTLY ONCE.
+      Then output the tool's result verbatim.
 
-      Step 1 — Vector search:
-        Call find_confluence_page_ids(query=<SEARCH_QUERY>).
-        If PAGE_RESULTS are returned (not [NO PAGES FOUND]):
-          Output the PAGE_RESULTS block verbatim. Done.
-
-      Step 2 — CQL fallback (only if Step 1 returned [NO PAGES FOUND]):
-        Call fetch_confluence_page(query=<SEARCH_QUERY>).
-        Parse any page IDs from the result URLs (look for pageId=<number>).
-        Output:
-          PAGE_RESULTS (from CQL fallback):
-          page_id=<id> | title="<title>" | score=1.00 | matched_sections=[]
-        If CQL also finds nothing, output:
-          [NO PAGES FOUND] No relevant pages found for: "<query>"
-
-      Output ONLY the PAGE_RESULTS block or the [NO PAGES FOUND] message.
-      Do NOT include the fetched content in your output.
+      CRITICAL:
+        • Call the tool AT MOST ONCE.  Do not retry, do not re-search, do not
+          call other tools.  The tool already handles BM25 fallback, CQL
+          fallback, and reranking internally.
+        • Do NOT summarise, paraphrase, or edit the tool output — the answer
+          agent needs the full fetched content verbatim.
     tools:
-      - find_confluence_page_ids
-      - fetch_confluence_page
+      - search_and_fetch_pages
+    max_iterations: 1
     temperature: 0.0
 
-  # ---- Step 3: Fetch full pages -------------------------------------------
-  - name: page_fetcher_agent
-    display_name: Fetch Pages
-    type: llm
-    description: Fetches full Confluence page content by page ID with smart compression.
-    role: |
-      You are a content retrieval agent. Your job is to fetch the full content
-      of Confluence pages identified in the previous step.
-
-      You have one tool:
-        fetch_page_by_id(page_id, query)  — fetches the complete page from
-                                            Confluence by page ID; applies
-                                            query-guided compression for large pages
-
-      ── FOLLOW-UP MODE ───────────────────────────────────────────────────────
-      If the previous message contains "[FOLLOW-UP — SKIP RETRIEVAL]", output:
-        [FOLLOW-UP — PAGES ALREADY IN CONTEXT]
-      Do NOT call any tool.
-
-      ── NO RESULTS MODE ──────────────────────────────────────────────────────
-      If the previous message contains "[NO PAGES FOUND]", output:
-        [NO PAGES FOUND]
-      Do NOT call any tool.
-
-      ── FETCH MODE ───────────────────────────────────────────────────────────
-      Read the PAGE_RESULTS from the previous message.
-      Extract the original user question from the conversation history.
-
-      Fetch up to 3 pages (highest score first):
-        For each page_id: call fetch_page_by_id(page_id=<id>, query=<user question>)
-
-      Output ALL fetched page content verbatim, separated by:
-        ─────────────────────────────
-      Do NOT summarise, paraphrase, or omit any content from the fetched pages.
-    tools:
-      - fetch_page_by_id
-    temperature: 0.0
-
-  # ---- Step 4: Answer -------------------------------------------------------
+  # ---- Step 3: Answer ------------------------------------------------------
   - name: answer_agent
     display_name: Answer
     type: llm
@@ -177,7 +138,8 @@ agents:
         • Do NOT add a Sources section unless citing new information.
 
       ── NO RESULTS MODE ──────────────────────────────────────────────────────
-      If the previous message contains "[NO PAGES FOUND]":
+      If the previous message contains "[NO PAGES FOUND]" or
+      "[NO PAGES PARSED]":
         "I couldn't find relevant pages in the knowledge base for this question.
          Please check Confluence directly or contact the relevant team."
 
@@ -202,6 +164,7 @@ agents:
       2. [Page Title](exact-url-from-fetched-content)
       (Copy URLs verbatim from the "URL:" line in the fetched content.)
     tools: []
+    max_iterations: 1
     temperature: 0.1
 
   # ---- Orchestrator ---------------------------------------------------------
@@ -209,13 +172,13 @@ agents:
     display_name: DevOps Knowledgebase Pipeline
     type: sequential
     description: >
-      Full knowledge base pipeline:
-      analyse query → locate pages (RAG + CQL fallback) →
-      fetch full pages (with compression) → synthesise grounded answer.
+      Streamlined knowledge base pipeline:
+      analyse query → atomic retrieve-and-fetch → synthesise grounded answer.
+      Three LLM calls total (was four), with parallel page fetching inside
+      the retriever tool.
     sub_agents:
       - query_analyzer_agent
-      - page_locator_agent
-      - page_fetcher_agent
+      - retriever_agent
       - answer_agent
 
 entry_agent: devops_kb_pipeline
