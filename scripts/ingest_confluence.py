@@ -511,18 +511,57 @@ def _get_store(reset: bool = False):
     )
 
 
+def _build_embedding_text(chunk: dict) -> str:
+    """Compose the text that actually gets embedded.
+
+    Retrieval accuracy improves substantially when the page title and the
+    heading breadcrumb (e.g. "Setup > Jenkins > Credentials") are prepended
+    to the chunk body before embedding.  Both signals are already in the
+    chunk's metadata — docling's HybridChunker emits them, and the HTML
+    chunker tracks them per section — but until now they were ignored at
+    embed time, so rare-term queries like "Jenkins credentials" lost the
+    strongest semantic anchor.
+
+    Output shape:
+        <title>
+        <section>
+
+        <chunk body>
+
+    Skips empty title/section cleanly.  The original body text is preserved
+    intact, so reranker/display code that reads ``page_content`` still works.
+    """
+    title = (chunk.get("title") or "").strip()
+    section = (chunk.get("section") or "").strip()
+    body = (chunk.get("text") or "").strip()
+
+    header_lines: list[str] = []
+    if title:
+        header_lines.append(title)
+    if section and section != title:
+        header_lines.append(section)
+
+    if not header_lines:
+        return body
+    return "\n".join(header_lines) + "\n\n" + body
+
+
 def _upsert_chunks(store, chunks: list[dict]) -> int:
     """Add chunks to the vector store, deduplicating by (title, section)."""
     from langchain_core.documents import Document
 
     docs = [
         Document(
-            page_content=c["text"],
+            page_content=_build_embedding_text(c),
             metadata={
                 "title": c["title"],
                 "section": c["section"],
                 "url": c["url"],
-                "page_id": c.get("page_id", ""),  # ← ADD THIS
+                "page_id": c.get("page_id", ""),
+                # Preserve the original chunk body so downstream display code
+                # (citations, matched_sections summaries) can show it without
+                # the title/breadcrumb prefix.
+                "raw_text": c.get("text", ""),
             },
         )
         for c in chunks

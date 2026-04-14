@@ -122,7 +122,9 @@ def _mock_fetch_confluence_page(query: str) -> str:
     return "\n\n---\n\n".join(parts)
 
 # Minimum cosine-similarity score to include a result in page lookups.
-_RELEVANCE_THRESHOLD = 0.20
+# Configurable via config.SIMILARITY_THRESHOLD (env: SIMILARITY_THRESHOLD).
+# This module reads config lazily at call time so test suites / runtime
+# reloads pick up changes without reimporting.
 
 # Pages with total plain-text content below this threshold are returned in
 # full without compression.  Above it, query-guided section extraction applies.
@@ -361,9 +363,10 @@ def _vector_search_pages(query: str, candidate_k: int) -> tuple[list[str], dict[
     )
 
     page_map: dict[str, dict] = {}
+    threshold = config.SIMILARITY_THRESHOLD
 
     for doc, score in results:
-        if score < _RELEVANCE_THRESHOLD:
+        if score < threshold:
             continue
 
         meta = doc.metadata
@@ -469,10 +472,12 @@ def find_confluence_page_ids(query: str, top_k: int = 5) -> str:
     candidate_k = (
         config.RERANKER_CANDIDATE_K
         if config.RERANKER_PROVIDER.lower() != "none"
-        else top_k * 6
+        else top_k * 4
     )
-    # Always fetch at least top_k * 4 vector candidates for adequate recall
-    vector_fetch_k = max(candidate_k * 4, top_k * 4)
+    # A candidate pool of ~2× is enough recall for page-level grouping; pages
+    # are deduped and the best chunk per page wins.  Going higher wastes
+    # embedding compute without changing top_k results.
+    vector_fetch_k = max(candidate_k * 2, top_k * 4)
 
     try:
         vector_ranked, page_map = _vector_search_pages(query, vector_fetch_k)
@@ -766,6 +771,97 @@ def fetch_confluence_page(query: str) -> str:
     return "\n\n---\n\n".join(parts)
 
 
+# ── Tool: search_and_fetch_pages (atomic retrieve + fetch) ────────────────────
+
+def search_and_fetch_pages(query: str, top_k: int = 3) -> str:
+    """
+    Atomic RAG retrieval: find the top pages for a query AND fetch their
+    compressed content in a single tool call.  Designed to replace the
+    two-step page_locator → page_fetcher dance that used to require two
+    separate LLM turns.
+
+    Pipeline:
+      1. Vector search (optional BM25 + RRF, optional reranker)
+      2. Parallel fetch of the top-k pages (threaded, with per-page cache)
+      3. Query-guided compression for large pages
+      4. CQL fallback when vector search returns [NO PAGES FOUND]
+
+    Args:
+        query:  Natural-language question or search phrase.
+        top_k:  Number of pages to fetch (default 3 — matches the prior
+                page_fetcher cap; keeps context window predictable).
+
+    Returns:
+        A single formatted block ready to be consumed by the answer agent:
+
+            PAGES_FETCHED: <n>
+            ─────────────────────────────
+            **Page Title**
+            URL: https://...
+
+            <page content>
+            ─────────────────────────────
+            **Next Page Title**
+            ...
+
+        Or the [NO PAGES FOUND] / [NO RESULTS AFTER FALLBACK] sentinel
+        when nothing is retrievable.
+    """
+    # ── Step 1: locate page IDs via the existing retrieval pipeline ─────────
+    located = find_confluence_page_ids(query, top_k=top_k)
+
+    if located.startswith("[NO PAGES FOUND]") or located.startswith("[find_confluence_page_ids]"):
+        # Try CQL fallback against live Confluence.
+        cql_result = fetch_confluence_page(query)
+        if cql_result.startswith("[fetch_confluence_page]"):
+            return (
+                "[NO PAGES FOUND] No relevant pages in the knowledge base or via "
+                f"CQL search for: '{query}'\n\n{cql_result}"
+            )
+        return (
+            "PAGES_FETCHED: 1 (CQL fallback)\n"
+            "─────────────────────────────\n"
+            f"{cql_result}"
+        )
+
+    # Extract page_id values from the PAGE_RESULTS block.  The format is:
+    #   page_id=<id> | title="<title>" | score=<0.00> | matched_sections=[...]
+    page_ids: list[str] = []
+    for line in located.splitlines():
+        m = re.match(r"\s*page_id=(\d+)\s*\|", line)
+        if m:
+            page_ids.append(m.group(1))
+
+    if not page_ids:
+        # Defensive: find_confluence_page_ids returned a well-formed block but
+        # we couldn't parse any IDs.  Surface the raw block so the LLM can see.
+        return f"[NO PAGES PARSED]\n{located}"
+
+    # ── Step 2: fetch pages in parallel ─────────────────────────────────────
+    # Confluence fetches are I/O-bound (HTTPS + cache read).  A small thread
+    # pool matches or beats sequential by 2–3× for top_k=3.
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _safe_fetch(pid: str) -> tuple[str, str]:
+        try:
+            return pid, fetch_page_by_id(pid, query)
+        except Exception as exc:
+            return pid, f"[fetch_page_by_id] Failed to fetch page {pid}: {exc}"
+
+    # Preserve the retrieval order (best score first) in the output.
+    max_workers = min(len(page_ids[:top_k]), 4)
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        fetched = list(ex.map(_safe_fetch, page_ids[:top_k]))
+
+    # ── Step 3: assemble the response block ────────────────────────────────
+    separator = "─────────────────────────────"
+    parts = [f"PAGES_FETCHED: {len(fetched)}", separator]
+    for _, content in fetched:
+        parts.append(content)
+        parts.append(separator)
+    return "\n".join(parts)
+
+
 # ── Tool: search_confluence (backward compatibility) ──────────────────────────
 
 def search_confluence(query: str, top_k: int = 5) -> str:
@@ -802,7 +898,7 @@ def search_confluence(query: str, top_k: int = 5) -> str:
     except Exception as exc:
         return f"[search_confluence] Search failed: {exc}"
 
-    relevant = [(doc, score) for doc, score in results if score >= _RELEVANCE_THRESHOLD]
+    relevant = [(doc, score) for doc, score in results if score >= config.SIMILARITY_THRESHOLD]
 
     if not relevant:
         return (

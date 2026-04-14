@@ -112,6 +112,13 @@ DOCLING_TOKENIZER_PROVIDER: str = os.getenv("DOCLING_TOKENIZER_PROVIDER", "local
 # Only used when DOCLING_TOKENIZER_PROVIDER=local.
 DOCLING_TOKENIZER_MODEL: str = os.getenv("DOCLING_TOKENIZER_MODEL", "")
 
+# Minimum cosine-similarity score for a chunk to be included in retrieval
+# results.  Lowering this value increases recall at the cost of precision;
+# raising it is stricter.  Used by tools/confluence.py::_vector_search_pages.
+# 0.15 is a safer default than the previous hardcoded 0.20 — it captures
+# borderline-relevant chunks that a reranker or RRF merge can then reorder.
+SIMILARITY_THRESHOLD: float = float(os.getenv("SIMILARITY_THRESHOLD", "0.15"))
+
 # BM25 hybrid retrieval — adds keyword search alongside vector search.
 # Results from both are merged via Reciprocal Rank Fusion (RRF).
 # Requires: pip install rank-bm25  (build the index with ingest_confluence.py)
