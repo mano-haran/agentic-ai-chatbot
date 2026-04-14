@@ -6,15 +6,35 @@ from langchain_core.tools import StructuredTool
 from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode
 
-# Some LLM backends (e.g. Phi-3 variants) emit internal control tokens such as
-# <|end|>, <|start|>, <|channel|> inside the response text.  If these reach the
-# context history, subsequent API calls fail with formatting/validation errors.
+# Some LLM backends (e.g. Phi-3, GPT-OSS/Harmony variants) emit internal
+# control tokens such as <|end|>, <|start|>, <|channel|> inside the response
+# text.  If these reach the context history, subsequent API calls fail with
+# formatting/validation errors.
 _ARTIFACT_TOKEN_RE = re.compile(r"<\|[^|>]*\|>")
+
+# Harmony-style chat-template leaks where the <|...|> delimiters were already
+# stripped by the tokenizer but the role+channel keywords remain fused into
+# the text (e.g. "assistantanalysis", "assistantfinal", "userfinal").  When
+# this happens the model has entered its private reasoning channel — the
+# cleanest thing we can do is truncate the response at the leak point, since
+# everything after the marker is thinking-channel garbage and anything before
+# is the legitimate user-facing output (if any).
+_HARMONY_CHANNEL_RE = re.compile(
+    r"(?:assistant|user|system|tool)(?:analysis|final|commentary|channel)",
+    re.IGNORECASE,
+)
 
 
 def _strip_artifact_tokens(text: str) -> str:
-    """Remove internal LLM artifact tokens (e.g. <|end|>, <|start|>) from text."""
-    return _ARTIFACT_TOKEN_RE.sub("", text).strip()
+    """Remove internal LLM artifact tokens and Harmony channel leaks from text."""
+    cleaned = _ARTIFACT_TOKEN_RE.sub("", text)
+    # If a fused Harmony channel marker slipped through, truncate at the leak
+    # — everything after is the model's private reasoning channel and must not
+    # reach the user or downstream agents.
+    match = _HARMONY_CHANNEL_RE.search(cleaned)
+    if match:
+        cleaned = cleaned[: match.start()]
+    return cleaned.strip()
 
 
 import config
