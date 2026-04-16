@@ -1455,12 +1455,15 @@ python scripts/ingest_confluence.py --space DEV --reset
 
 ## 16. MCP Servers — Jenkins & Jira Data Center
 
-This project ships two standalone **Model Context Protocol (MCP) servers** that expose
-Jenkins and Jira Data Center capabilities to any MCP-compatible client:
-Claude Desktop, other AI agents, IDE plugins, or custom integrations.
+This project ships two **Model Context Protocol (MCP) servers** plus a **unified gateway**
+that exposes all servers on a single port under named context paths.
 
-The MCP servers are **independent** from the Chainlit chat app.  They can be run
-separately and called by any tool that speaks the MCP protocol.
+```
+mcp/
+├── jenkins.py   — Jenkins Data Center tools  (context: mcp-jenkins)
+├── jira.py      — Jira Data Center tools     (context: mcp-jira)
+└── gateway.py   — Single-port gateway: auth, rate limiting, context routing
+```
 
 ### What is MCP?
 
@@ -1469,16 +1472,378 @@ connecting AI models to external tools and data sources.  An MCP server exposes 
 set of named tools with JSON schemas; an MCP client (e.g. Claude Desktop) discovers
 and calls them automatically.
 
-### Server locations
+### Context-based tool invocation
 
-| Server | File | Default port (SSE) |
-|--------|------|--------------------|
-| Jenkins DC | `mcp/jenkins/server.py` | 8001 |
-| Jira DC | `mcp/jira/server.py` | 8002 |
+Each server is identified by its **context name**.  Tools are called as:
+
+```
+<context-name>/<tool-name>
+```
+
+Examples:
+```
+mcp-jenkins/trigger_build
+mcp-jenkins/get_console_log
+mcp-jira/create_issue
+mcp-jira/transition_issue
+```
+
+### Gateway endpoints (single port)
+
+The gateway hosts all servers on **one port** (default `8000`):
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `GET` | `/mcp-jenkins/sse` | Jenkins — SSE event stream |
+| `POST` | `/mcp-jenkins/messages` | Jenkins — send MCP messages |
+| `GET` | `/mcp-jira/sse` | Jira — SSE event stream |
+| `POST` | `/mcp-jira/messages` | Jira — send MCP messages |
+| `GET` | `/health` | Health check + tool catalogue (unauthenticated) |
 
 ### Available tools
 
-**Jenkins MCP server (`jenkins-mcp`)**
+**Jenkins (`mcp-jenkins`)**
+
+| Tool | Description |
+|------|-------------|
+| `trigger_build` | Trigger a job by path, pass `repo` + `branch` params, wait for build number |
+| `get_build_status` | Current result / `building` flag for a build |
+| `wait_for_completion` | Block-poll until build finishes or times out |
+| `get_console_log` | Fetch (truncated) console log for a build |
+| `list_builds` | List recent builds for a job |
+
+**Jira (`mcp-jira`)**
+
+| Tool | Description |
+|------|-------------|
+| `create_issue` | Create a new issue (summary, description, type, labels, priority) |
+| `get_issue` | Retrieve an issue by key |
+| `update_issue` | Update summary, description, priority, assignee, or custom fields |
+| `add_comment` | Post a comment |
+| `transition_issue` | Move an issue through its workflow |
+| `get_project` | Project metadata and available issue types |
+| `link_issues` | Create a directional link between two issues |
+
+---
+
+### Prerequisites
+
+```bash
+pip install 'mcp>=1.0.0' httpx uvicorn
+# or: pip install -r requirements.txt
+```
+
+---
+
+### Running the gateway (recommended)
+
+The gateway is the recommended way to run the MCP servers — one process, one port,
+all servers, with auth and rate limiting built in.
+
+```bash
+# Mock mode (no real Jenkins or Jira needed)
+MOCK_JENKINS=true MOCK_JIRA=true python mcp/gateway.py
+
+# With real credentials
+JENKINS_URL=http://jenkins.company.com \
+JENKINS_USER=admin \
+JENKINS_TOKEN=your-token \
+JIRA_URL=https://jira.company.com \
+JIRA_TOKEN=your-pat \
+python mcp/gateway.py
+
+# Custom port
+python mcp/gateway.py --port 9000
+
+# With API key auth
+MCP_GATEWAY_API_KEY=mysecret python mcp/gateway.py
+```
+
+Verify the gateway is running:
+```bash
+curl http://localhost:8000/health
+```
+```json
+{
+  "status": "ok",
+  "gateway": "0.0.0.0:8000",
+  "auth_enabled": false,
+  "rate_limit_rpm": 60,
+  "servers": {
+    "mcp-jenkins": {
+      "sse": "/mcp-jenkins/sse",
+      "messages": "/mcp-jenkins/messages",
+      "tools": ["get_build_status", "get_console_log", "list_builds", "trigger_build", "wait_for_completion"]
+    },
+    "mcp-jira": {
+      "sse": "/mcp-jira/sse",
+      "messages": "/mcp-jira/messages",
+      "tools": ["add_comment", "create_issue", "get_issue", "get_project", "link_issues", "transition_issue", "update_issue"]
+    }
+  }
+}
+```
+
+### Running in stdio mode (for Claude Desktop)
+
+Individual servers can be run standalone in stdio mode without the gateway:
+
+```bash
+MOCK_JENKINS=true python mcp/jenkins.py   # Jenkins only
+MOCK_JIRA=true    python mcp/jira.py      # Jira only
+```
+
+---
+
+### Gateway configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MCP_GATEWAY_HOST` | `0.0.0.0` | Bind host |
+| `MCP_GATEWAY_PORT` | `8000` | Bind port |
+| `MCP_GATEWAY_API_KEY` | `""` | API key (empty = auth disabled) |
+| `MCP_RATE_LIMIT_RPM` | `60` | Max POST requests per minute per IP |
+| `MCP_RATE_LIMIT_BURST` | `20` | Initial burst size |
+
+**Auth** — when `MCP_GATEWAY_API_KEY` is set, clients must send:
+```
+Authorization: Bearer <token>
+```
+or:
+```
+X-API-Key: <token>
+```
+
+**Rate limiting** — token-bucket per client IP, applied to `POST /messages` only.
+SSE connections (GET `/sse`) are not rate-limited.
+
+---
+
+### Testing with the MCP CLI inspector
+
+```bash
+# Jenkins (stdio, mock)
+MOCK_JENKINS=true mcp dev mcp/jenkins.py
+
+# Jira (stdio, mock)
+MOCK_JIRA=true mcp dev mcp/jira.py
+```
+
+The inspector opens a browser UI where you can browse and call tools interactively.
+
+---
+
+### Testing with Python
+
+```python
+import asyncio, json
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
+
+async def test_jenkins():
+    server = StdioServerParameters(
+        command="python",
+        args=["mcp/jenkins.py"],
+        env={"MOCK_JENKINS": "true", "MOCK_DATA_DIR": "tests/mock_data"},
+    )
+    async with stdio_client(server) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+
+            # List tools (all under mcp-jenkins context)
+            tools = await session.list_tools()
+            print([t.name for t in tools.tools])
+            # → ['get_build_status', 'get_console_log', 'list_builds', 'trigger_build', 'wait_for_completion']
+
+            # Trigger a build
+            result = await session.call_tool(
+                "trigger_build",
+                {"job_path": "jobs/ms-build", "repo": "my-org/my-service", "branch": "main"},
+            )
+            data = json.loads(result.content[0].text)
+            print(data)  # → {"build_number": 1, "status": "STARTED", ...}
+
+            # Fetch console log
+            log = await session.call_tool(
+                "get_console_log",
+                {"job_path": "jobs/ms-build", "build_number": data["build_number"]},
+            )
+            print(log.content[0].text)
+
+asyncio.run(test_jenkins())
+```
+
+---
+
+### Testing with curl (SSE gateway)
+
+```bash
+# Start the gateway (separate terminal)
+MOCK_JENKINS=true MOCK_JIRA=true python mcp/gateway.py
+
+# Health check
+curl http://localhost:8000/health
+
+# Trigger a Jenkins build via MCP
+curl -X POST http://localhost:8000/mcp-jenkins/messages \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0", "id": 1,
+    "method": "tools/call",
+    "params": {
+      "name": "trigger_build",
+      "arguments": {"job_path": "jobs/ms-build", "repo": "my-org/my-service", "branch": "main"}
+    }
+  }'
+
+# Create a Jira issue
+curl -X POST http://localhost:8000/mcp-jira/messages \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0", "id": 2,
+    "method": "tools/call",
+    "params": {
+      "name": "create_issue",
+      "arguments": {"project_key": "MYPROJ", "summary": "Build: my-service @ main", "issue_type": "Task"}
+    }
+  }'
+
+# With API key auth
+curl -X POST http://localhost:8000/mcp-jenkins/messages \
+  -H "Authorization: Bearer mysecret" \
+  -H "Content-Type: application/json" \
+  -d '...'
+```
+
+---
+
+### Claude Desktop integration
+
+**Gateway (SSE — recommended when the gateway is running):**
+
+Add to `claude_desktop_config.json`:
+```json
+{
+  "mcpServers": {
+    "mcp-jenkins": {
+      "url": "http://localhost:8000/mcp-jenkins/sse"
+    },
+    "mcp-jira": {
+      "url": "http://localhost:8000/mcp-jira/sse"
+    }
+  }
+}
+```
+
+With API key:
+```json
+{
+  "mcpServers": {
+    "mcp-jenkins": {
+      "url": "http://localhost:8000/mcp-jenkins/sse",
+      "headers": {"Authorization": "Bearer mysecret"}
+    }
+  }
+}
+```
+
+**Stdio (no gateway needed — spawns servers as subprocesses):**
+```json
+{
+  "mcpServers": {
+    "mcp-jenkins": {
+      "command": "python",
+      "args": ["/absolute/path/to/agentic-ai-chatbot/mcp/jenkins.py"],
+      "env": {
+        "JENKINS_URL": "http://jenkins.company.com",
+        "JENKINS_USER": "admin",
+        "JENKINS_TOKEN": "your-api-token"
+      }
+    },
+    "mcp-jira": {
+      "command": "python",
+      "args": ["/absolute/path/to/agentic-ai-chatbot/mcp/jira.py"],
+      "env": {
+        "JIRA_URL": "https://jira.company.com",
+        "JIRA_TOKEN": "your-personal-access-token"
+      }
+    }
+  }
+}
+```
+
+**Mock mode:**
+```json
+{
+  "mcpServers": {
+    "mcp-jenkins": {
+      "command": "python",
+      "args": ["/absolute/path/to/agentic-ai-chatbot/mcp/jenkins.py"],
+      "env": {
+        "MOCK_JENKINS": "true",
+        "MOCK_DATA_DIR": "/absolute/path/to/agentic-ai-chatbot/tests/mock_data"
+      }
+    }
+  }
+}
+```
+
+### Adding a new MCP server to the gateway
+
+1. Create `mcp/myservice.py` — define a `FastMCP("mcp-myservice")` instance with your tools.
+2. Import it in `mcp/gateway.py` and add it to `_REGISTRY`:
+
+```python
+# mcp/gateway.py
+from mcp.myservice import mcp as _myservice_mcp
+
+_REGISTRY: dict[str, object] = {
+    "mcp-jenkins":   _jenkins_mcp,
+    "mcp-jira":      _jira_mcp,
+    "mcp-myservice": _myservice_mcp,   # ← add here
+}
+```
+
+The gateway automatically creates `/mcp-myservice/sse` and `/mcp-myservice/messages` endpoints.
+
+---
+
+### Environment variable reference
+
+**Gateway**
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MCP_GATEWAY_HOST` | `0.0.0.0` | Bind host |
+| `MCP_GATEWAY_PORT` | `8000` | Bind port |
+| `MCP_GATEWAY_API_KEY` | `""` | API key (empty = disabled) |
+| `MCP_RATE_LIMIT_RPM` | `60` | Rate limit requests/min per IP |
+| `MCP_RATE_LIMIT_BURST` | `20` | Burst capacity |
+
+**Jenkins**
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `JENKINS_URL` | `http://localhost:8080` | Jenkins base URL |
+| `JENKINS_USER` | — | Username |
+| `JENKINS_TOKEN` | — | API token |
+| `MOCK_JENKINS` | `false` | Use mock data |
+
+**Jira**
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `JIRA_URL` | — | Jira base URL |
+| `JIRA_TOKEN` | — | Personal Access Token (preferred) |
+| `JIRA_USER` | — | Basic Auth username (fallback) |
+| `JIRA_PASSWORD` | — | Basic Auth password (fallback) |
+| `MOCK_JIRA` | `false` | Use mock data |
+
+**Shared**
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MOCK_DATA_DIR` | `tests/mock_data` | Root of mock data files |
 
 | Tool | Description |
 |------|-------------|
