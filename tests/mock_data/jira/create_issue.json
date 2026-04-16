@@ -1,0 +1,10 @@
+{
+  "id": "10001",
+  "key": "MYPROJ-123",
+  "url": "http://mock-jira/browse/MYPROJ-123",
+  "summary": "Build: my-org/my-service @ main",
+  "description": "Build pipeline run for repository my-org/my-service on branch main.",
+  "issue_type": "Task",
+  "status": "To Do",
+  "message": "[MOCK] Issue MYPROJ-123 created"
+}

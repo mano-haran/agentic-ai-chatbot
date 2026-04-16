@@ -23,6 +23,7 @@ layer that lets you define workflows in plain YAML **or** Python — your choice
 13. [Getting Started](#13-getting-started)
 14. [Testing with Mock Data](#14-testing-with-mock-data)
 15. [RAG Strategy Configuration](#15-rag-strategy-configuration)
+16. [MCP Servers — Jenkins & Jira Data Center](#16-mcp-servers--jenkins--jira-data-center)
 
 ---
 
@@ -1449,3 +1450,386 @@ python scripts/ingest_confluence.py --space DEV --reset
 | All layers | Best | Best | +200–500 ms | All of the above |
 
 > **Incremental adoption**: Each layer is independently useful.  Start with BM25 (zero query latency cost) and add reranking when precision matters most.
+
+---
+
+## 16. MCP Servers — Jenkins & Jira Data Center
+
+This project ships two standalone **Model Context Protocol (MCP) servers** that expose
+Jenkins and Jira Data Center capabilities to any MCP-compatible client:
+Claude Desktop, other AI agents, IDE plugins, or custom integrations.
+
+The MCP servers are **independent** from the Chainlit chat app.  They can be run
+separately and called by any tool that speaks the MCP protocol.
+
+### What is MCP?
+
+[Model Context Protocol](https://modelcontextprotocol.io/) is an open standard for
+connecting AI models to external tools and data sources.  An MCP server exposes a
+set of named tools with JSON schemas; an MCP client (e.g. Claude Desktop) discovers
+and calls them automatically.
+
+### Server locations
+
+| Server | File | Default port (SSE) |
+|--------|------|--------------------|
+| Jenkins DC | `mcp/jenkins/server.py` | 8001 |
+| Jira DC | `mcp/jira/server.py` | 8002 |
+
+### Available tools
+
+**Jenkins MCP server (`jenkins-mcp`)**
+
+| Tool | Description |
+|------|-------------|
+| `trigger_jenkins_build` | Trigger a job by path (e.g. `jobs/ms-build`), pass `repo` + `branch` params, wait for build number |
+| `get_jenkins_build_status` | Get current result / `building` flag for a specific build |
+| `wait_for_build_completion` | Block-poll until a build finishes or times out |
+| `get_jenkins_build_log` | Fetch (truncated) console log for a build |
+| `list_jenkins_builds` | List recent builds for a job |
+
+**Jira MCP server (`jira-mcp`)**
+
+| Tool | Description |
+|------|-------------|
+| `create_jira_issue` | Create a new issue with summary, description, type, labels, priority |
+| `get_jira_issue` | Retrieve an issue by key |
+| `update_jira_issue` | Update summary, description, priority, assignee, or custom fields |
+| `add_jira_comment` | Post a comment on an issue |
+| `transition_jira_issue` | Move an issue through its workflow (e.g. To Do → In Progress → Done) |
+| `get_jira_project` | Get project metadata and available issue types |
+| `link_jira_issues` | Create a directional link between two issues |
+
+---
+
+### Prerequisites
+
+```bash
+pip install 'mcp>=1.0.0' httpx uvicorn
+# or just:
+pip install -r requirements.txt
+```
+
+---
+
+### Transport modes
+
+Both servers support two transports selectable at startup:
+
+| Transport | How to enable | Use case |
+|-----------|--------------|----------|
+| **stdio** (default) | run without flags | Claude Desktop, programmatic subprocess usage |
+| **SSE** | `--sse` flag or `MCP_TRANSPORT=sse` | Web clients, multi-client scenarios, Docker |
+
+---
+
+### Running in stdio mode
+
+stdio mode is the standard for Claude Desktop and most MCP clients.  The client
+spawns the server as a subprocess and communicates over stdin/stdout.
+
+**Jenkins:**
+```bash
+# From the project root
+MOCK_JENKINS=true python mcp/jenkins/server.py
+```
+
+**Jira:**
+```bash
+# From the project root
+MOCK_JIRA=true python mcp/jira/server.py
+```
+
+With real credentials:
+```bash
+JENKINS_URL=http://jenkins.company.com \
+JENKINS_USER=admin \
+JENKINS_TOKEN=your-token \
+python mcp/jenkins/server.py
+
+JIRA_URL=https://jira.company.com \
+JIRA_TOKEN=your-pat \
+python mcp/jira/server.py
+```
+
+---
+
+### Running in SSE mode
+
+SSE mode starts an HTTP server that multiple clients can connect to simultaneously.
+
+**Jenkins (port 8001 by default):**
+```bash
+# Mock mode
+MOCK_JENKINS=true python mcp/jenkins/server.py --sse
+
+# Real Jenkins
+JENKINS_URL=http://jenkins.company.com \
+JENKINS_USER=admin \
+JENKINS_TOKEN=your-token \
+python mcp/jenkins/server.py --sse
+
+# Custom host/port
+JENKINS_SSE_HOST=0.0.0.0 JENKINS_SSE_PORT=9001 \
+python mcp/jenkins/server.py --sse
+```
+
+**Jira (port 8002 by default):**
+```bash
+# Mock mode
+MOCK_JIRA=true python mcp/jira/server.py --sse
+
+# Real Jira DC
+JIRA_URL=https://jira.company.com \
+JIRA_TOKEN=your-pat \
+python mcp/jira/server.py --sse
+```
+
+Once running, the SSE endpoints are:
+
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `http://localhost:8001/sse` | GET | Jenkins — SSE event stream |
+| `http://localhost:8001/messages` | POST | Jenkins — send MCP messages |
+| `http://localhost:8002/sse` | GET | Jira — SSE event stream |
+| `http://localhost:8002/messages` | POST | Jira — send MCP messages |
+
+---
+
+### Testing with the MCP CLI
+
+The easiest way to test a server interactively is the `mcp` CLI inspector:
+
+```bash
+pip install mcp
+
+# Test Jenkins server in stdio mode (mock data)
+MOCK_JENKINS=true mcp dev mcp/jenkins/server.py
+
+# Test Jira server in stdio mode (mock data)
+MOCK_JIRA=true mcp dev mcp/jira/server.py
+```
+
+The inspector opens a browser UI where you can browse tools, fill in parameters,
+and call them without writing any client code.
+
+---
+
+### Testing with Python (stdio)
+
+```python
+import asyncio
+import json
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
+
+async def test_jenkins():
+    server = StdioServerParameters(
+        command="python",
+        args=["mcp/jenkins/server.py"],
+        env={"MOCK_JENKINS": "true", "MOCK_DATA_DIR": "tests/mock_data"},
+    )
+    async with stdio_client(server) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+
+            # List available tools
+            tools = await session.list_tools()
+            print("Tools:", [t.name for t in tools.tools])
+
+            # Trigger a build
+            result = await session.call_tool(
+                "trigger_jenkins_build",
+                {"job_path": "jobs/ms-build", "repo": "my-org/my-service", "branch": "main"},
+            )
+            print("Trigger result:", result.content[0].text)
+
+            # Wait for completion
+            data = json.loads(result.content[0].text)
+            build_number = data.get("build_number", 1)
+            done = await session.call_tool(
+                "wait_for_build_completion",
+                {"job_path": "jobs/ms-build", "build_number": build_number},
+            )
+            print("Build result:", done.content[0].text)
+
+asyncio.run(test_jenkins())
+```
+
+```python
+async def test_jira():
+    server = StdioServerParameters(
+        command="python",
+        args=["mcp/jira/server.py"],
+        env={"MOCK_JIRA": "true", "MOCK_DATA_DIR": "tests/mock_data"},
+    )
+    async with stdio_client(server) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+
+            # Create an issue
+            result = await session.call_tool(
+                "create_jira_issue",
+                {
+                    "project_key": "MYPROJ",
+                    "summary": "Build: my-org/my-service @ main",
+                    "description": "Automated build triggered by DevOps Pipeline.",
+                    "issue_type": "Task",
+                    "labels_json": '["automated-build", "ci-pipeline"]',
+                },
+            )
+            print("Created:", result.content[0].text)
+
+asyncio.run(test_jira())
+```
+
+---
+
+### Testing with curl (SSE mode)
+
+Start the servers in SSE mode, then use curl to send MCP JSON-RPC requests:
+
+```bash
+# Start Jenkins server in SSE mode (separate terminal)
+MOCK_JENKINS=true python mcp/jenkins/server.py --sse
+
+# In another terminal — initialize the session
+curl -X POST http://localhost:8001/messages \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"curl-test","version":"1.0"}}}'
+
+# List tools
+curl -X POST http://localhost:8001/messages \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
+
+# Trigger a build
+curl -X POST http://localhost:8001/messages \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": 3,
+    "method": "tools/call",
+    "params": {
+      "name": "trigger_jenkins_build",
+      "arguments": {
+        "job_path": "jobs/ms-build",
+        "repo": "my-org/my-service",
+        "branch": "main"
+      }
+    }
+  }'
+```
+
+---
+
+### Claude Desktop integration
+
+Add the servers to `claude_desktop_config.json`
+(usually `~/.config/claude/claude_desktop_config.json` on Linux/Mac,
+`%APPDATA%\Claude\claude_desktop_config.json` on Windows):
+
+**stdio mode (recommended for desktop):**
+```json
+{
+  "mcpServers": {
+    "jenkins": {
+      "command": "python",
+      "args": ["/absolute/path/to/agentic-ai-chatbot/mcp/jenkins/server.py"],
+      "env": {
+        "JENKINS_URL": "http://jenkins.your-company.com",
+        "JENKINS_USER": "your-username",
+        "JENKINS_TOKEN": "your-api-token"
+      }
+    },
+    "jira": {
+      "command": "python",
+      "args": ["/absolute/path/to/agentic-ai-chatbot/mcp/jira/server.py"],
+      "env": {
+        "JIRA_URL": "https://jira.your-company.com",
+        "JIRA_TOKEN": "your-personal-access-token"
+      }
+    }
+  }
+}
+```
+
+**Mock mode (for testing without real servers):**
+```json
+{
+  "mcpServers": {
+    "jenkins": {
+      "command": "python",
+      "args": ["/absolute/path/to/agentic-ai-chatbot/mcp/jenkins/server.py"],
+      "env": {
+        "MOCK_JENKINS": "true",
+        "MOCK_DATA_DIR": "/absolute/path/to/agentic-ai-chatbot/tests/mock_data"
+      }
+    },
+    "jira": {
+      "command": "python",
+      "args": ["/absolute/path/to/agentic-ai-chatbot/mcp/jira/server.py"],
+      "env": {
+        "MOCK_JIRA": "true",
+        "MOCK_DATA_DIR": "/absolute/path/to/agentic-ai-chatbot/tests/mock_data"
+      }
+    }
+  }
+}
+```
+
+After saving, restart Claude Desktop.  You will see `jenkins` and `jira` listed
+in the tools panel and Claude can call them directly in conversation.
+
+---
+
+### DevOps Pipeline workflow
+
+The `devops_pipeline` workflow in `workflows/devops_pipeline/workflow.yaml` uses the
+Jira and Jenkins tools directly via the Python `@tool` decorator (not via MCP).  This
+means the pipeline runs fully inside the Chainlit app without any external MCP server.
+
+The MCP servers serve a complementary purpose: they make the same Jenkins/Jira
+capabilities available to Claude Desktop, IDE plugins, and other external agents
+through the standard MCP protocol.
+
+**To test the DevOps Pipeline in the Chainlit app with mock data:**
+
+```bash
+# .env
+MOCK_JENKINS=true
+MOCK_JIRA=true
+```
+
+Then start the app and type:
+
+> "Run a build for MYPROJ, repo my-org/my-service, branch main"
+
+The build agent will:
+1. Create a Jira ticket (`MYPROJ-123` in mock mode)
+2. Trigger `jobs/ms-build` on Jenkins (build #1 in mock mode)
+3. Wait for completion (`SUCCESS` immediately in mock mode)
+4. Update the Jira ticket with the build result
+5. Report the outcome in the chat
+
+---
+
+### Environment variable reference for MCP servers
+
+| Variable | Server | Default | Description |
+|----------|--------|---------|-------------|
+| `JENKINS_URL` | Jenkins | `http://localhost:8080` | Jenkins base URL |
+| `JENKINS_USER` | Jenkins | — | Jenkins username |
+| `JENKINS_TOKEN` | Jenkins | — | Jenkins API token |
+| `JENKINS_SSE_HOST` | Jenkins | `0.0.0.0` | SSE bind host |
+| `JENKINS_SSE_PORT` | Jenkins | `8001` | SSE bind port |
+| `MOCK_JENKINS` | Jenkins | `false` | Use mock data |
+| `JIRA_URL` | Jira | — | Jira base URL |
+| `JIRA_TOKEN` | Jira | — | Personal Access Token (preferred) |
+| `JIRA_USER` | Jira | — | Basic Auth username (fallback) |
+| `JIRA_PASSWORD` | Jira | — | Basic Auth password (fallback) |
+| `JIRA_SSE_HOST` | Jira | `0.0.0.0` | SSE bind host |
+| `JIRA_SSE_PORT` | Jira | `8002` | SSE bind port |
+| `MOCK_JIRA` | Jira | `false` | Use mock data |
+| `MOCK_DATA_DIR` | Both | `tests/mock_data` | Root of mock data directory |
+| `MCP_TRANSPORT` | Both | `stdio` | `stdio` or `sse` |

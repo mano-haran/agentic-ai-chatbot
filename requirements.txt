@@ -7,6 +7,12 @@ pyyaml>=6.0
 python-dotenv>=1.0.0
 requests>=2.31.0
 
+# ── MCP servers (Jenkins + Jira Data Center) ──────────────────────────────────
+# Required to run mcp/jenkins/server.py and mcp/jira/server.py
+mcp>=1.0.0                       # Model Context Protocol SDK (FastMCP, stdio + SSE)
+httpx>=0.27.0                    # Async HTTP client used by MCP server tools
+uvicorn>=0.30.0                  # ASGI server for SSE transport (auto-used by FastMCP)
+
 # ── LLM providers — install only what you use ─────────────────────────────────
 langchain-openai>=0.3.0          # OpenAI + any OpenAI-compatible endpoint (required)
 # langchain-anthropic>=0.3.0    # Anthropic Claude  (uncomment to enable)

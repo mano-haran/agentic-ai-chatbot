@@ -14,6 +14,10 @@ browser.  Accepted URL forms:
     Job URL:   https://jenkins.acme.com/job/MyApp/
     Build URL: https://jenkins.acme.com/job/MyApp/142/
 
+Pipeline tools (trigger_jenkins_build, wait_for_build_completion) also
+accept a slash-separated job path, e.g. 'jobs/ms-build', which is
+automatically converted to the correct nested Jenkins URL.
+
 Console logs larger than LOG_TAIL_LINES lines are automatically truncated
 to the last LOG_TAIL_LINES lines so the LLM context is not flooded.
 """
@@ -21,6 +25,7 @@ to the last LOG_TAIL_LINES lines so the LLM context is not flooded.
 import os
 import json
 import re
+import time
 from pathlib import Path
 
 import requests
@@ -28,6 +33,7 @@ import config
 from framework.tools.decorators import tool
 
 LOG_TAIL_LINES = 200
+POLL_INTERVAL_SECONDS = 15   # how often to poll during wait_for_build_completion
 
 
 # ── Mock mode helpers ──────────────────────────────────────────────────────────
@@ -41,6 +47,58 @@ def _mock_build_number(url: str) -> str | None:
     """Extract the build number from a Jenkins build URL, or None for job URLs."""
     m = re.search(r"/job/[^/]+/(\d+)/?$", url.rstrip("/"))
     return m.group(1) if m else None
+
+
+def _job_path_to_url(job_path: str) -> str:
+    """
+    Convert a slash-separated job path to a fully-qualified Jenkins URL.
+
+    'jobs/ms-build'  →  http://jenkins/job/jobs/job/ms-build
+    'MyApp'          →  http://jenkins/job/MyApp
+    """
+    parts = [p for p in job_path.strip("/").split("/") if p]
+    url = config.JENKINS_URL.rstrip("/")
+    for part in parts:
+        url = f"{url}/job/{part}"
+    return url
+
+
+def _mock_trigger_build(job_path: str) -> str:
+    base = _job_path_to_url(job_path)
+    return json.dumps(
+        {
+            "queue_item_url": f"{config.JENKINS_URL}/queue/item/42/",
+            "build_number": 1,
+            "build_url": f"{base}/1/",
+            "status": "STARTED",
+            "message": f"[MOCK] Build triggered for {job_path}",
+        },
+        indent=2,
+    )
+
+
+def _mock_wait_build(job_path: str, build_number: int) -> str:
+    base = _job_path_to_url(job_path)
+    mock_info = _mock_dir() / "build_pipeline_1_info.json"
+    if mock_info.exists():
+        data = json.loads(mock_info.read_text())
+        data["job_path"] = job_path
+        data["elapsed_seconds"] = 0
+        data["message"] = "[MOCK] Build completed"
+        return json.dumps(data, indent=2)
+    return json.dumps(
+        {
+            "job_path": job_path,
+            "build_number": build_number,
+            "result": "SUCCESS",
+            "building": False,
+            "duration_ms": 45000,
+            "url": f"{base}/{build_number}/",
+            "elapsed_seconds": 0,
+            "message": "[MOCK] Build completed",
+        },
+        indent=2,
+    )
 
 
 def _mock_get_jenkins_builds(job_url: str, limit: int) -> str:
@@ -248,3 +306,179 @@ def get_build_info(build_url: str) -> str:
         return json.dumps({"error": f"Jenkins returned HTTP {e.response.status_code}: {e.response.reason}"})
     except Exception as e:
         return json.dumps({"error": str(e)})
+
+
+# ── Pipeline tools ─────────────────────────────────────────────────────────────
+
+
+@tool(description=(
+    "Trigger a Jenkins job by its path (e.g. 'jobs/ms-build') and wait for it to leave the queue. "
+    "Optionally pass a Bitbucket repo name (repo) and git branch (branch) as build parameters. "
+    "Returns JSON with: queue_item_url, build_number, build_url, status. "
+    "Use wait_for_build_completion to poll until the build finishes."
+))
+def trigger_jenkins_build(
+    job_path: str,
+    repo: str = "",
+    branch: str = "",
+    extra_params_json: str = "",
+) -> str:
+    """
+    Trigger a Jenkins build and wait for a build number to be assigned.
+
+    Args:
+        job_path: Slash-separated Jenkins job path, e.g. 'jobs/ms-build'.
+        repo: Bitbucket repository name to pass as the REPO build parameter.
+        branch: Git branch to build, passed as the BRANCH build parameter.
+        extra_params_json: JSON object string of any additional build parameters,
+            e.g. '{"DEPLOY_ENV": "staging"}'.
+    """
+    if config.MOCK_JENKINS:
+        return _mock_trigger_build(job_path)
+
+    parameters: dict[str, str] = {}
+    if repo:
+        parameters["REPO"] = repo
+    if branch:
+        parameters["BRANCH"] = branch
+    if extra_params_json:
+        try:
+            parameters.update(json.loads(extra_params_json))
+        except json.JSONDecodeError as exc:
+            return json.dumps({"error": f"extra_params_json is not valid JSON: {exc}"})
+
+    job_base = _job_path_to_url(job_path)
+    trigger_url = (
+        f"{job_base}/buildWithParameters" if parameters else f"{job_base}/build"
+    )
+
+    try:
+        # Fetch CSRF crumb — required for Jenkins POST requests
+        crumb_headers: dict[str, str] = {}
+        try:
+            cr = requests.get(
+                f"{config.JENKINS_URL}/crumbIssuer/api/json",
+                auth=_auth(),
+                timeout=10,
+            )
+            if cr.status_code == 200:
+                ci = cr.json()
+                crumb_headers[ci["crumbRequestField"]] = ci["crumb"]
+        except Exception:
+            pass  # CSRF may be disabled
+
+        resp = requests.post(
+            trigger_url,
+            auth=_auth(),
+            data=parameters or None,
+            headers=crumb_headers,
+            timeout=30,
+        )
+        if resp.status_code not in (200, 201):
+            return json.dumps(
+                {"error": f"Jenkins returned HTTP {resp.status_code}: {resp.text[:300]}"}
+            )
+
+        queue_url = resp.headers.get("Location", "").rstrip("/") + "/"
+        result: dict = {"queue_item_url": queue_url, "status": "QUEUED"}
+
+        # Poll for up to 60 s until the build number is assigned
+        deadline = time.time() + 60
+        while time.time() < deadline:
+            time.sleep(3)
+            try:
+                q_resp = requests.get(
+                    f"{queue_url}api/json", auth=_auth(), timeout=10
+                )
+                if q_resp.status_code == 200:
+                    q_data = q_resp.json()
+                    if q_data.get("cancelled"):
+                        result["status"] = "CANCELLED"
+                        return json.dumps(result, indent=2)
+                    executable = q_data.get("executable")
+                    if executable:
+                        result.update(
+                            {
+                                "build_number": executable["number"],
+                                "build_url": executable["url"],
+                                "status": "STARTED",
+                            }
+                        )
+                        return json.dumps(result, indent=2)
+            except Exception:
+                pass
+
+        result.update(
+            {
+                "status": "STILL_QUEUED",
+                "message": "Build did not start within 60 s. Check the Jenkins build queue.",
+            }
+        )
+        return json.dumps(result, indent=2)
+
+    except requests.exceptions.ConnectionError:
+        return json.dumps(
+            {"error": f"Cannot reach Jenkins at {config.JENKINS_URL}. Check URL and network."}
+        )
+    except Exception as exc:
+        return json.dumps({"error": str(exc)})
+
+
+@tool(description=(
+    "Poll a Jenkins build until it completes, then return the final result. "
+    "Call this after trigger_jenkins_build once you have the build_number. "
+    "Provide the job_path (e.g. 'jobs/ms-build') and the build_number. "
+    "Returns JSON with: result (SUCCESS/FAILURE/UNSTABLE/ABORTED), build_url, duration_ms, elapsed_seconds."
+))
+def wait_for_build_completion(
+    job_path: str,
+    build_number: int,
+    timeout_seconds: int = 1800,
+) -> str:
+    """
+    Block-poll a Jenkins build until it finishes or the timeout expires.
+
+    Args:
+        job_path: Slash-separated Jenkins job path, e.g. 'jobs/ms-build'.
+        build_number: Build number returned by trigger_jenkins_build.
+        timeout_seconds: Maximum seconds to wait (default 1800 = 30 min).
+    """
+    if config.MOCK_JENKINS:
+        return _mock_wait_build(job_path, build_number)
+
+    api_url = f"{_job_path_to_url(job_path)}/{build_number}/api/json"
+    deadline = time.time() + timeout_seconds
+    elapsed = 0
+
+    while time.time() < deadline:
+        try:
+            resp = requests.get(api_url, auth=_auth(), timeout=15)
+            resp.raise_for_status()
+            data = resp.json()
+            if not data.get("building", True):
+                return json.dumps(
+                    {
+                        "job_path": job_path,
+                        "build_number": data.get("number"),
+                        "result": data.get("result"),
+                        "building": False,
+                        "duration_ms": data.get("duration"),
+                        "url": data.get("url"),
+                        "elapsed_seconds": elapsed,
+                    },
+                    indent=2,
+                )
+        except Exception:
+            pass  # transient error — keep polling
+
+        time.sleep(POLL_INTERVAL_SECONDS)
+        elapsed += POLL_INTERVAL_SECONDS
+
+    return json.dumps(
+        {
+            "error": "Build did not complete within timeout",
+            "job_path": job_path,
+            "build_number": build_number,
+            "timeout_seconds": timeout_seconds,
+        }
+    )

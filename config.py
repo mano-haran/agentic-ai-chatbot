@@ -66,6 +66,13 @@ JENKINS_URL: str = os.getenv("JENKINS_URL", "http://localhost:8080")
 JENKINS_USER: str = os.getenv("JENKINS_USER", "")
 JENKINS_TOKEN: str = os.getenv("JENKINS_TOKEN", "")
 
+# Jira Data Center (used by devops_pipeline workflow and Jira MCP server)
+# Auth priority: JIRA_TOKEN (Bearer) → JIRA_USER + JIRA_PASSWORD (Basic Auth)
+JIRA_URL: str = os.getenv("JIRA_URL", "")
+JIRA_TOKEN: str = os.getenv("JIRA_TOKEN", "")          # Personal Access Token (recommended)
+JIRA_USER: str = os.getenv("JIRA_USER", "")            # Basic Auth username (fallback)
+JIRA_PASSWORD: str = os.getenv("JIRA_PASSWORD", "")    # Basic Auth password (fallback)
+
 # Confluence Data Center (used by confluence_qa workflow)
 CONFLUENCE_URL: str = os.getenv("CONFLUENCE_URL", "")
 CONFLUENCE_TOKEN: str = os.getenv("CONFLUENCE_TOKEN", "")   # Personal Access Token
@@ -90,6 +97,9 @@ EMBEDDING_API_KEY: str = os.getenv("EMBEDDING_API_KEY", "")    # API key if diff
 # Set MOCK_JENKINS=true to make Jenkins tools read from tests/mock_data/jenkins/
 # instead of calling a real Jenkins server.  No Jenkins server needed.
 MOCK_JENKINS: bool = os.getenv("MOCK_JENKINS", "false").lower() == "true"
+# Set MOCK_JIRA=true to make Jira tools return canned responses from
+# tests/mock_data/jira/ without a real Jira server.
+MOCK_JIRA: bool = os.getenv("MOCK_JIRA", "false").lower() == "true"
 # Set MOCK_CONFLUENCE=true to make fetch_page_by_id and fetch_confluence_page
 # read from tests/mock_data/confluence/ instead of calling the Confluence API.
 # find_confluence_page_ids still queries Chroma — run ingest first (see README).

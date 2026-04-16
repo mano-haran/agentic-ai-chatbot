@@ -1,0 +1,23 @@
+{
+  "_class": "hudson.model.Queue$BlockedItem",
+  "actions": [],
+  "blocked": false,
+  "buildable": true,
+  "id": 42,
+  "inQueueSince": 1705402247000,
+  "params": "\nREPO=my-org/my-service\nBRANCH=main",
+  "stuck": false,
+  "task": {
+    "_class": "org.jenkinsci.plugins.workflow.job.WorkflowJob",
+    "name": "ms-build",
+    "url": "http://mock-jenkins/job/jobs/job/ms-build/",
+    "color": "blue"
+  },
+  "url": "queue/item/42/",
+  "why": null,
+  "executable": {
+    "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+    "number": 1,
+    "url": "http://mock-jenkins/job/jobs/job/ms-build/1/"
+  }
+}

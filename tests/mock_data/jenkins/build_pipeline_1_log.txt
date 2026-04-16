@@ -1,0 +1,60 @@
+Started by DevOps Pipeline Agent
+Running on Jenkins agent in /var/lib/jenkins/workspace/ms-build
+[Pipeline] Start of Pipeline
+[Pipeline] node
+Running on Built-In Node in /var/lib/jenkins/workspace/ms-build
+[Pipeline] {
+[Pipeline] stage
+[Pipeline] { (Checkout)
+[Pipeline] git
+The recommended git tool is: NONE
+using credential bitbucket-credentials
+Cloning the remote Git repository
+Cloning repository https://bitbucket.example.com/my-org/my-service.git
+ > git init /var/lib/jenkins/workspace/ms-build # timeout=10
+Fetching upstream changes from https://bitbucket.example.com/my-org/my-service.git
+ > git --version # timeout=10
+ > git fetch --tags --force --progress -- https://bitbucket.example.com/my-org/my-service.git +refs/heads/*:refs/remotes/origin/*
+ > git config remote.origin.url https://bitbucket.example.com/my-org/my-service.git
+ > git checkout -b main origin/main
+Commit message: "Add authentication middleware"
+ > git rev-parse HEAD^{commit} # timeout=10
+[Pipeline] }
+[Pipeline] // stage
+[Pipeline] stage
+[Pipeline] { (Build)
+[Pipeline] sh
++ mvn clean package -DskipTests=false -B
+[INFO] Scanning for projects...
+[INFO] ------------------------------------------------------------------------
+[INFO] Building my-service 2.4.1-SNAPSHOT
+[INFO] ------------------------------------------------------------------------
+[INFO] --- maven-resources-plugin:3.3.1:resources (default-resources) ---
+[INFO] --- maven-compiler-plugin:3.11.0:compile (default-compile) ---
+[INFO] Compiling 38 source files to /var/lib/jenkins/workspace/ms-build/target/classes
+[INFO] --- maven-resources-plugin:3.3.1:testResources (default-testResources) ---
+[INFO] --- maven-compiler-plugin:3.11.0:testCompile (default-testCompile) ---
+[INFO] Compiling 12 test source files to /var/lib/jenkins/workspace/ms-build/target/test-classes
+[Pipeline] }
+[Pipeline] // stage
+[Pipeline] stage
+[Pipeline] { (Test)
+[Pipeline] sh
++ mvn test -B
+[INFO] --- maven-surefire-plugin:3.1.2:test (default-test) ---
+[INFO] Tests run: 42, Failures: 0, Errors: 0, Skipped: 2, Time elapsed: 14.321 s
+[INFO] BUILD SUCCESS
+[Pipeline] }
+[Pipeline] // stage
+[Pipeline] stage
+[Pipeline] { (Package)
+[Pipeline] sh
++ mvn package -DskipTests -B
+[INFO] Building jar: /var/lib/jenkins/workspace/ms-build/target/my-service-2.4.1-SNAPSHOT.jar
+[INFO] BUILD SUCCESS
+[Pipeline] }
+[Pipeline] // stage
+[Pipeline] }
+[Pipeline] // node
+[Pipeline] End of Pipeline
+Finished: SUCCESS

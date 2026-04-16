@@ -1,0 +1,15 @@
+{
+  "id": "10001",
+  "key": "MYPROJ-123",
+  "url": "http://mock-jira/browse/MYPROJ-123",
+  "summary": "Build: my-org/my-service @ main",
+  "description": "h3. Build Pipeline Run\n\n*Repository:* my-org/my-service\n*Branch:* main\n*Triggered:* 2024-01-16 10:30:00 UTC\n*Pipeline:* jobs/ms-build (Jenkins)",
+  "status": "In Progress",
+  "issue_type": "Task",
+  "priority": "Medium",
+  "assignee": "ci-automation",
+  "reporter": "devops-agent",
+  "labels": ["automated-build", "ci-pipeline"],
+  "created": "2024-01-16T10:30:00.000+0000",
+  "updated": "2024-01-16T10:31:00.000+0000"
+}
