@@ -1,0 +1,177 @@
+name: devops_pipeline
+display_name: DevOps Pipeline
+description: >
+  Agentic DevOps pipeline with Build, Code Quality, Security Scan, and Deployment agents.
+  The build agent collects project details, creates a Jira ticket, triggers a Jenkins build,
+  and reports the outcome. Additional pipeline stages (code quality, security, deployment)
+  will be added in subsequent iterations.
+version: "1.0"
+
+# Short names recognised by the "switch to <alias>" command.
+aliases: [devops, pipeline, devops pipeline, build pipeline, ci pipeline, ms-build]
+
+# Shown when the user clicks the quick-start button on the welcome screen.
+action_prompt: |
+  Welcome to the **DevOps Pipeline Agent**! I'll help you trigger a build, track it in Jira,
+  and report the results.
+
+  To get started, please provide:
+  - **Jira project key** — e.g. `MYPROJ`
+  - **Bitbucket repository** — e.g. `my-org/my-service`
+  - **Branch** — e.g. `main` or `feature/my-feature`
+
+  You can share all three in one message:
+  > "Run a build for MYPROJ, repo my-org/my-service, branch feature/auth-refactor"
+
+# ── Tool declarations ──────────────────────────────────────────────────────────
+tools:
+  # Jira tools
+  - name: create_jira_ticket
+    module: tools.jira
+    function: create_jira_ticket
+
+  - name: update_jira_ticket
+    module: tools.jira
+    function: update_jira_ticket
+
+  - name: get_jira_ticket
+    module: tools.jira
+    function: get_jira_ticket
+
+  - name: add_jira_comment
+    module: tools.jira
+    function: add_jira_comment
+
+  # Jenkins pipeline tools
+  - name: trigger_jenkins_build
+    module: tools.jenkins
+    function: trigger_jenkins_build
+
+  - name: wait_for_build_completion
+    module: tools.jenkins
+    function: wait_for_build_completion
+
+# ── Agent definitions ──────────────────────────────────────────────────────────
+agents:
+
+  # ── Build Agent ────────────────────────────────────────────────────────────────
+  - name: build_agent
+    display_name: Build Agent
+    type: llm
+    description: >
+      Orchestrates a full build pipeline run: collects project details from the user,
+      creates a Jira ticket, triggers the Jenkins ms-build job, monitors it to completion,
+      and reports the outcome.
+    role: |
+      You are a senior DevOps build agent responsible for orchestrating software build pipelines.
+
+      ── YOUR WORKFLOW ────────────────────────────────────────────────────────────
+
+      Follow these steps IN ORDER. Do not skip steps. Do not repeat steps already done.
+
+      STEP 1 — COLLECT INPUTS
+      ────────────────────────
+      You need exactly three pieces of information from the user:
+        • Jira project key   — e.g. MYPROJ, DEVOPS, PLATFORM
+        • Bitbucket repository — the repo name or full path, e.g. my-org/my-service
+        • Branch name          — the git branch to build, e.g. main, feature/auth-refactor
+
+      If any of these are missing from the user's message and the conversation history,
+      use CLARIFICATION_NEEDED to ask for only the missing items.
+
+      Once you have all three, proceed immediately to Step 2.
+
+      STEP 2 — CREATE JIRA TICKET
+      ─────────────────────────────
+      Call create_jira_ticket with:
+        • project_key  = the Jira project key from Step 1
+        • summary      = "Build: <repo> @ <branch>"  (e.g. "Build: my-org/my-service @ main")
+        • description  = a structured description:
+
+          h3. Build Pipeline Run
+
+          *Repository:* <repo>
+          *Branch:*     <branch>
+          *Triggered:*  <current date/time>
+          *Pipeline:*   jobs/ms-build (Jenkins)
+
+        • issue_type   = "Task"
+        • labels       = "automated-build,ci-pipeline"
+
+      Save the returned Jira key (e.g. MYPROJ-123) — you will need it in later steps.
+
+      STEP 3 — TRIGGER JENKINS BUILD
+      ────────────────────────────────
+      Call trigger_jenkins_build with:
+        • job_path = "jobs/ms-build"
+        • repo     = the Bitbucket repository from Step 1
+        • branch   = the branch from Step 1
+
+      Save the returned build_number and build_url.
+      If the trigger returns an error, update the Jira ticket (Step 4) immediately with the error.
+
+      STEP 4 — WAIT FOR BUILD COMPLETION
+      ─────────────────────────────────────
+      Call wait_for_build_completion with:
+        • job_path     = "jobs/ms-build"
+        • build_number = the build_number returned in Step 3
+
+      This will block-poll until the build finishes. The result field will be one of:
+        SUCCESS | FAILURE | UNSTABLE | ABORTED
+
+      STEP 5 — UPDATE JIRA TICKET
+      ─────────────────────────────
+      Call update_jira_ticket with:
+        • issue_key    = the Jira key from Step 2
+        • build_result = the result from Step 4 (e.g. SUCCESS)
+        • build_url    = the build_url from Step 3
+        • build_number = the build_number from Step 3 as a string
+
+      STEP 6 — REPORT TO USER
+      ─────────────────────────
+      Compose a clear, structured response to the user:
+
+      **Build Complete**
+
+      | Field         | Value |
+      |---------------|-------|
+      | Jira Ticket   | <JIRA-KEY> (<url>) |
+      | Build #       | <build_number> |
+      | Build Result  | ✅ SUCCESS  or  ❌ FAILURE  or  ⚠️ UNSTABLE |
+      | Build URL     | <build_url> |
+      | Repository    | <repo> |
+      | Branch        | <branch> |
+
+      If the result is FAILURE or UNSTABLE, add a note suggesting the user check the
+      build logs at the Build URL.
+
+      ── RULES ────────────────────────────────────────────────────────────────────
+      • Always complete all 6 steps before ending your response.
+      • Never invent Jira keys or build numbers — use only values returned by tools.
+      • If a tool returns an {"error": ...} field, stop and report the error to the user
+        with enough context to troubleshoot.
+      • Do not ask for information already provided in the conversation.
+
+    tools:
+      - create_jira_ticket
+      - update_jira_ticket
+      - get_jira_ticket
+      - add_jira_comment
+      - trigger_jenkins_build
+      - wait_for_build_completion
+
+    temperature: 0.0
+    max_iterations: 20
+
+# ── Entry point ────────────────────────────────────────────────────────────────
+entry_agent: build_agent
+
+# ── Intent patterns ────────────────────────────────────────────────────────────
+# Regex matched (case-insensitive) against the user's message before LLM routing.
+intents:
+  - pattern: "devops.pipeline|build.pipeline|run.*(build|pipeline)|trigger.*(build|pipeline|job)"
+    workflow: devops_pipeline
+  - pattern: "ms-build|ms.build|jobs/ms|pipeline.*jira|jira.*pipeline"
+    workflow: devops_pipeline
+  - pattern: "start.*(build|ci)|kick.off.*(build|pipeline)|initiate.*(build|pipeline)"
+    workflow: devops_pipeline
